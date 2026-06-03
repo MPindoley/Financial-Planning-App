@@ -78,7 +78,8 @@ function defaultState() {
     goals: [{ id: uid(), name: 'Retirement', type: 'retirement', priority: 'High' }],
     events: [],
     rothStrategy: { on: false, mode: 'fill', toRate: 0.24, amount: 50000, startAge: 65, endAge: 72 },
-    advisorNotes: ''
+    advisorNotes: '',
+    ui: { collapsed: false }
   };
 }
 
@@ -843,21 +844,21 @@ const LIAB_TYPES = [['mortgage', 'Mortgage'], ['auto', 'Auto Loan'], ['student',
 const typeOpts = (types, sel) => types.map(([v, l]) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${l}</option>`).join('');
 
 function assetRow(a, i) {
-  return `<div class="repeat-row" style="grid-template-columns:1fr 150px 120px 26px">
-    <input type="text" data-arr="assets" data-idx="${i}" data-key="name" value="${escapeAttr(a.name)}" placeholder="Account name">
-    <select data-arr="assets" data-idx="${i}" data-key="type">${typeOpts(ASSET_TYPES, a.type)}</select>
-    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(a.balance)}"></div>
+  return `<div class="repeat-row" style="grid-template-columns:1fr 150px 132px 24px;align-items:end">
+    <div class="rr-cell"><label>Account name</label><input type="text" data-arr="assets" data-idx="${i}" data-key="name" value="${escapeAttr(a.name)}" placeholder="e.g. 401(k), Brokerage"></div>
+    <div class="rr-cell"><label>Type</label><select data-arr="assets" data-idx="${i}" data-key="type">${typeOpts(ASSET_TYPES, a.type)}</select></div>
+    <div class="rr-cell"><label>Balance</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(a.balance)}"></div></div>
     <button class="rr-del" data-action="del-asset" data-idx="${i}" title="Remove">×</button></div>`;
 }
 function liabRow(l, i) {
-  return `<div class="repeat-row" style="grid-template-columns:1fr 110px 26px">
-    <input type="text" data-arr="liabilities" data-idx="${i}" data-key="name" value="${escapeAttr(l.name)}" placeholder="Liability">
-    <select data-arr="liabilities" data-idx="${i}" data-key="type">${typeOpts(LIAB_TYPES, l.type)}</select>
+  return `<div class="repeat-row" style="grid-template-columns:1fr 120px 24px;align-items:end">
+    <div class="rr-cell"><label>Liability</label><input type="text" data-arr="liabilities" data-idx="${i}" data-key="name" value="${escapeAttr(l.name)}" placeholder="e.g. Mortgage"></div>
+    <div class="rr-cell"><label>Type</label><select data-arr="liabilities" data-idx="${i}" data-key="type">${typeOpts(LIAB_TYPES, l.type)}</select></div>
     <button class="rr-del" data-action="del-liab" data-idx="${i}" title="Remove">×</button>
-    <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem">
-      <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(l.balance)}" title="Balance"></div>
-      <div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="liabilities" data-idx="${i}" data-key="rate" data-vtype="percent" value="${l.rate || 0}" title="Interest rate"><span class="suffix">%</span></div>
-      <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="payment" data-money value="${moneyDisplay(l.payment || 0)}" title="Monthly payment"></div>
+    <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem">
+      <div class="rr-cell"><label>Balance owed</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(l.balance)}"></div></div>
+      <div class="rr-cell"><label>Interest rate</label><div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="liabilities" data-idx="${i}" data-key="rate" data-vtype="percent" value="${l.rate || 0}"><span class="suffix">%</span></div></div>
+      <div class="rr-cell"><label>Monthly payment</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="payment" data-money value="${moneyDisplay(l.payment || 0)}"></div></div>
     </div></div>`;
 }
 function goalRow(g, i) {
@@ -927,8 +928,9 @@ function newPlan(seed) {
 }
 function switchPlan(id) {
   const store = loadStore(); const p = store.plans[id]; if (!p) return;
-  currentPlanId = id; STATE = Object.assign(defaultState(), p.state);
+  currentPlanId = id; STATE = ensureDefaults(p.state);
   store.current = id; saveStore(store);
+  document.body.classList.toggle('inputs-collapsed', !!(STATE.ui && STATE.ui.collapsed));
   resetBuilt(); RESULTS = compute(STATE); showView('dashboard'); refreshAll(); closePlanMenu();
   toast(`Opened <b>${escapeHtml(planLabel(STATE))}</b>`);
 }
@@ -982,6 +984,7 @@ function ensureDefaults(S) {
   S.events = S.events || [];
   if (S.advisorNotes == null) S.advisorNotes = '';
   S.presentation = Object.assign({ hidden: {} }, S.presentation);
+  S.ui = Object.assign({ collapsed: false }, S.ui);
   S.quickRetire = Object.assign({ age: S.household.client.age, retireAge: S.household.client.retireAge, lifeExpectancy: S.household.client.lifeExpectancy, currentSavings: 300000, monthlySavings: 1500, desiredAnnualIncome: 90000, socialSecurity: 30000 }, S.quickRetire);
   S.quickProtect = Object.assign({ income: 150000, replacePct: 70, replaceYears: 15, debts: 300000, finalExpenses: 20000, existingCoverage: 250000 }, S.quickProtect);
   return S;
@@ -990,6 +993,7 @@ const isHidden = key => !!(STATE.presentation && STATE.presentation.hidden && ST
 const hideAttr = key => `data-client-hidden="${isHidden(key)}"`;
 const hideToggle = key => `<label class="hide-toggle advisor-only" title="Hide this section in presentation & client report">
   <input type="checkbox" data-action="hidesec" data-key="${key}" ${isHidden(key) ? 'checked' : ''}> Hide from client</label>`;
+const collapseBtn = () => `<button class="btn ghost sm advisor-only" data-action="toggle-inputs" title="Collapse the data-entry column to enlarge the charts">${(STATE.ui && STATE.ui.collapsed) ? '› Show data entry' : '‹ Hide data entry'}</button>`;
 
 function netWorthTable(R) {
   const aRows = (STATE.assets || []).map(a => `<tr><td>${escapeHtml(a.name || '—')}</td><td style="text-align:left;color:var(--muted);font-size:.78rem">${(ASSET_TYPES.find(t => t[0] === a.type) || [, a.type])[1]}</td><td class="amount">${fmt$(a.balance)}</td></tr>`).join('');
@@ -1301,7 +1305,7 @@ function liveNeeds() {
 /* ----------------------------- GOALS & CASH FLOW -------------------------- */
 function buildCashflow() {
   getViewEl('cashflow').innerHTML = headBlock('Plan', 'Goals & Cash Flow',
-    'Combine goals-based funding with comprehensive, year-by-year cash flow — the right conversation at the right time.') +
+    'Combine goals-based funding with comprehensive, year-by-year cash flow — the right conversation at the right time.', collapseBtn()) +
     `<div class="split io-split"><div class="advisor-only io-inputs">
       ${panel('Goals', `<div id="goalsList">${(STATE.goals || []).map(goalRow).join('')}</div><button class="add-row" data-action="add-goal">＋ Add goal</button>`,
         { sub: 'Funding tracker' })}
@@ -1553,7 +1557,7 @@ function buildTax() {
     fieldRow({ path: 'savingsSplit.pretax', label: 'Savings to pre-tax', type: 'percent' }, { path: 'savingsSplit.roth', label: 'to Roth', type: 'percent' }) +
     fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, STATE.household.spouse.included ? { path: 'income.ssClaimSpouse', label: 'SS claim — spouse', type: 'age' } : { path: 'assumptions.rmdStartAge', label: 'RMD start age', type: 'age' });
   getViewEl('tax').innerHTML = headBlock('Tax Strategy', 'Tax Planning',
-    'See the tax impact of the plan in real time — current brackets, lifetime taxes, RMDs, and bracket-based Roth conversions. Estimates to guide the conversation and the client’s CPA.') +
+    'See the tax impact of the plan in real time — current brackets, lifetime taxes, RMDs, and bracket-based Roth conversions. Estimates to guide the conversation and the client’s CPA.', collapseBtn()) +
     `<div class="split io-split"><div class="advisor-only io-inputs">
       ${panel('Tax Inputs', taxAssumptions, { sub: 'Drives every projection' })}
       ${panel('Roth Conversion Analyzer', rothControls, { sub: 'What-if' })}
@@ -1816,6 +1820,7 @@ function handleAction(action, el) {
     case 'save-baseline': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); recompute(); toast('Baseline saved — make a change to see the impact'); break; }
     case 'clear-baseline': delete STATE.baseline; scheduleSave(); recompute(); toast('Baseline cleared'); break;
     case 'apply-ss': setPath(STATE, 'income.' + el.dataset.key, +el.dataset.age); recompute(); toast(`Applied claim age ${el.dataset.age}`); break;
+    case 'toggle-inputs': STATE.ui = STATE.ui || {}; STATE.ui.collapsed = !STATE.ui.collapsed; document.body.classList.toggle('inputs-collapsed', STATE.ui.collapsed); el.textContent = STATE.ui.collapsed ? '› Show data entry' : '‹ Hide data entry'; scheduleSave(); break;
   }
 }
 
@@ -1904,6 +1909,7 @@ function init() {
   RESULTS = compute(STATE);
   wireEvents();
   saveCurrent();
+  document.body.classList.toggle('inputs-collapsed', !!(STATE.ui && STATE.ui.collapsed));
   updateHeader(); renderPlanMenu();
   showView('dashboard');
 }
