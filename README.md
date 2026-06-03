@@ -20,9 +20,26 @@ Eight modules, mapped to the way you actually run a planning conversation:
 | **Needs Analysis** | Fast, single-goal estimates (retirement, education, protection) to **engage prospects quickly** and create immediate impact. |
 | **Goals & Cash Flow** | Combine goals-based funding with comprehensive, year-by-year cash-flow planning. |
 | **Foundational Planning** | The holistic full picture — net worth, allocation, retirement outlook, and goal funding in one confident view. |
-| **Decision Center** | Model what-ifs live with sliders (retirement age, savings, return, spending, Social Security) and compare against the current plan in real time. |
+| **Tax Planning** | Real tax engine: current-year federal/state/FICA, a bracket visualization with conversion headroom, lifetime (cumulative) taxes, an RMD schedule, and a **bracket-based Roth-conversion analyzer** showing lifetime tax savings and estate impact. |
+| **Decision Center** | Model **life events** (a child, college, inheritance, a major purchase, long-term care, a market downturn, paying off the mortgage) and what-if sliders, compared against the current plan in real time. |
 | **CoPlanner** | Automated insights and a plan-readiness score that turn client data into ready-to-use planning actions. |
-| **Report Center** | Generate a branded, multi-page client report and print it or save it as a PDF. |
+| **Report Center** | Generate a branded, multi-page client report (now including a tax page) and print it or save it as a PDF. |
+
+### How the projection works
+The plan runs a year-by-year simulation to life expectancy with three separate tax
+buckets — **taxable**, **tax-deferred** (401k/IRA), and **Roth** — so withdrawals,
+growth, and taxes are modeled realistically:
+
+- **Taxes** use current federal brackets (inflated forward each year), standard
+  deductions by filing status, long-term capital-gains rates, Social Security
+  taxation (provisional-income rules), a flat state rate you set, and FICA on wages.
+- **RMDs** are forced from tax-deferred accounts starting at the RMD age (IRS
+  Uniform Lifetime Table).
+- **Debts** amortize using the interest rate and monthly payment you enter, so they
+  pay down over time and flow through net worth and cash flow.
+- **Roth conversions** can "fill up" a target bracket each year during a window you
+  choose; the analyzer compares lifetime taxes and ending estate with vs. without.
+- **Savings** are split across pre-tax / Roth / taxable per your inputs.
 
 ### Built for the meeting room
 
@@ -112,5 +129,13 @@ All projections are **hypothetical illustrations** based on the data and
 assumptions you enter (returns, inflation, taxes, Social Security, and life
 expectancy). They are deterministic estimates for discussion purposes, not a
 guarantee of future results, and not investment, tax, or legal advice. The
-default assumptions are editable on the **Client Profile** screen, and every
-printed report includes a disclosures page.
+default assumptions are editable on the **Client Profile** and **Tax Planning**
+screens, and every printed report includes a disclosures page.
+
+The tax figures are **simplified estimates** designed to guide the conversation
+and frame a discussion with the client's CPA. They use current federal brackets
+inflated forward, standard deductions, long-term capital-gains rates, Social
+Security taxation, and a flat state rate — but intentionally exclude credits,
+AMT, NIIT, IRMAA, itemized deductions, and many state-specific rules. Use them to
+spot opportunities (e.g., Roth-conversion headroom, RMD pressure), then have the
+client confirm specifics with their tax professional.

@@ -53,15 +53,19 @@ function defaultState() {
       filing: 'married', state: ''
     },
     income: { clientSalary: 0, spouseSalary: 0, otherIncome: 0, salaryGrowth: 3,
-              ssClient: 0, ssSpouse: 0, pension: 0 },
+              ssClient: 0, ssSpouse: 0, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 },
     expenses: { annualExpenses: 0, retirementExpensePct: 80 },
     savings:  { annualSavings: 0, employerMatch: 0 },
+    savingsSplit: { pretax: 70, roth: 15, taxable: 15 },
     assets: [], liabilities: [],
     insurance: { lifeClient: 0, lifeSpouse: 0 },
     protection: { replacePct: 70, replaceYears: 15, finalExpenses: 20000, includeDebt: true, includeEducation: true },
-    assumptions: { inflation: 2.7, preReturn: 6.5, postReturn: 4.8, eduInflation: 5, effectiveTaxRate: 22, ssCola: 2.3 },
+    assumptions: { inflation: 2.7, preReturn: 6.5, postReturn: 4.8, eduInflation: 5, effectiveTaxRate: 22, ssCola: 2.3,
+                   stateTaxRate: 0, dividendYield: 1.8, taxableBasisPct: 60, rmdStartAge: 73 },
     quickEducation: { childName: '', annualCost: 35000, yearsUntil: 10, duration: 4, funded: 0, monthly: 0 },
     goals: [{ id: uid(), name: 'Retirement', type: 'retirement', priority: 'High' }],
+    events: [],
+    rothStrategy: { on: false, mode: 'fill', toRate: 0.24, amount: 50000, startAge: 65, endAge: 72 },
     advisorNotes: ''
   };
 }
@@ -71,9 +75,16 @@ function sampleState() {
   const s = defaultState();
   s.household.client = { name: 'James Harrington', age: 52, retireAge: 65, lifeExpectancy: 92 };
   s.household.spouse = { included: true, name: 'Sarah Harrington', age: 50, retireAge: 65, lifeExpectancy: 94 };
-  s.income = { clientSalary: 110000, spouseSalary: 65000, otherIncome: 0, salaryGrowth: 3, ssClient: 30000, ssSpouse: 20000, pension: 0 };
+  s.household.filing = 'married'; s.household.state = 'NC';
+  s.income = { clientSalary: 110000, spouseSalary: 65000, otherIncome: 0, salaryGrowth: 3, ssClient: 30000, ssSpouse: 20000, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 };
   s.expenses = { annualExpenses: 95000, retirementExpensePct: 90 };
   s.savings = { annualSavings: 14000, employerMatch: 5000 };
+  s.savingsSplit = { pretax: 75, roth: 10, taxable: 15 };
+  s.assumptions = { inflation: 2.7, preReturn: 6.5, postReturn: 4.8, eduInflation: 5, effectiveTaxRate: 22, ssCola: 2.3, stateTaxRate: 4.5, dividendYield: 1.8, taxableBasisPct: 60, rmdStartAge: 73 };
+  s.events = [
+    { id: uid(), type: 'college', label: 'Emma — College', startAge: 60, years: 4, amount: 35000 },
+    { id: uid(), type: 'windfall', label: 'Inheritance', atAge: 70, amount: 100000 }
+  ];
   s.assets = [
     { id: uid(), name: 'Cash Reserve',        type: 'cash',        balance: 35000 },
     { id: uid(), name: 'Joint Brokerage',     type: 'taxable',     balance: 90000 },
@@ -115,6 +126,254 @@ const LS_KEY = 'mp_fp_plans_v1';
 function loadStore() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || { plans: {}, current: null }; } catch { return { plans: {}, current: null }; } }
 function saveStore(s) { try { localStorage.setItem(LS_KEY, JSON.stringify(s)); return true; } catch { return false; } }
 function planLabel(st) { return (st.household?.client?.name || '').trim() || 'New Client'; }
+
+/* ----------------------------- tax engine --------------------------------- */
+/* 2025 federal parameters (inflated forward by assumed inflation each year). */
+const TAX = {
+  baseYear: 2025,
+  std: { married: 31500, single: 15750, hoh: 23625 },
+  brackets: {
+    married: [[0, .10], [23850, .12], [96950, .22], [206700, .24], [394600, .32], [501050, .35], [751600, .37]],
+    single:  [[0, .10], [11925, .12], [48475, .22], [103350, .24], [197300, .32], [250525, .35], [626350, .37]],
+    hoh:     [[0, .10], [17000, .12], [64850, .22], [103350, .24], [197300, .32], [250500, .35], [626350, .37]]
+  },
+  ltcg: {
+    married: [[0, 0], [96700, .15], [600050, .20]],
+    single:  [[0, 0], [48350, .15], [533400, .20]],
+    hoh:     [[0, 0], [64750, .15], [566700, .20]]
+  },
+  ssBase: { married: [32000, 44000], single: [25000, 34000], hoh: [25000, 34000] },
+  ficaWageBase: 176100, ficaSS: 0.062, ficaMed: 0.0145
+};
+const RMD_TABLE = { 72: 27.4, 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1, 80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9, 96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4, 101: 6.0, 102: 5.6, 103: 5.2, 104: 4.9, 105: 4.6 };
+const rmdDivisor = age => (age < 72 ? 0 : (RMD_TABLE[Math.min(105, Math.round(age))] || 4.6));
+const filingOf = f => (f === 'married' ? 'married' : f === 'hoh' ? 'hoh' : 'single');
+
+function bracketTax(taxable, brackets) {
+  if (taxable <= 0) return 0; let tax = 0;
+  for (let i = 0; i < brackets.length; i++) {
+    const lo = brackets[i][0], rate = brackets[i][1], hi = i + 1 < brackets.length ? brackets[i + 1][0] : Infinity;
+    if (taxable > lo) tax += (Math.min(taxable, hi) - lo) * rate; else break;
+  }
+  return tax;
+}
+function marginalRate(taxable, brackets) { let r = brackets[0][1]; for (const [lo, rate] of brackets) if (taxable > lo) r = rate; return r; }
+function bracketTopFor(targetRate, brackets) {
+  for (let i = 0; i < brackets.length; i++) if (Math.abs(brackets[i][1] - targetRate) < 1e-9) return i + 1 < brackets.length ? brackets[i + 1][0] : Infinity;
+  return Infinity;
+}
+/* Taxable portion of Social Security via provisional income (thresholds are not inflation-indexed). */
+function ssTaxablePortion(ss, otherIncome, filing) {
+  if (ss <= 0) return 0;
+  const [t1, t2] = TAX.ssBase[filing] || TAX.ssBase.single;
+  const prov = otherIncome + 0.5 * ss;
+  if (prov <= t1) return 0;
+  if (prov <= t2) return Math.min(0.5 * ss, 0.5 * (prov - t1));
+  const tier1 = Math.min(0.5 * ss, 0.5 * (t2 - t1));
+  return Math.min(0.85 * ss, 0.85 * (prov - t2) + tier1);
+}
+/* Long-term cap gains / qualified dividends stacked on top of ordinary taxable income. */
+function ltcgTax(gain, ordinaryTaxable, br) {
+  if (gain <= 0) return 0;
+  let tax = 0; const start = Math.max(0, ordinaryTaxable), end = start + gain;
+  for (let i = 0; i < br.length; i++) {
+    const lo = br[i][0], rate = br[i][1], hi = i + 1 < br.length ? br[i + 1][0] : Infinity;
+    const a = Math.max(lo, start), b = Math.min(hi, end);
+    if (b > a) tax += (b - a) * rate;
+  }
+  return tax;
+}
+/* Full single-year tax estimate. All amounts nominal for the given year. */
+function computeTax(o) {
+  const filing = filingOf(o.filing);
+  const f = o.inflFac || 1;
+  const brackets = TAX.brackets[filing].map(([lo, r]) => [lo * f, r]);
+  const ltcgBr = TAX.ltcg[filing].map(([lo, r]) => [lo * f, r]);
+  const std = TAX.std[filing] * f;
+  const wages = +o.wages || 0, pretax = +o.pretax || 0;
+  const ordinaryGross = Math.max(0, wages - pretax) + (+o.pension || 0) + (+o.taxableInterest || 0) +
+    (+o.deferredWithdrawal || 0) + (+o.rothConversion || 0);
+  const ss = +o.ss || 0, gains = (+o.qualDiv || 0) + (+o.ltcgRealized || 0);
+  const ssTaxable = ssTaxablePortion(ss, ordinaryGross + gains, filing);
+  const agi = ordinaryGross + gains + ssTaxable;
+  const ordIncome = ordinaryGross + ssTaxable;
+  const ordinaryTaxable = Math.max(0, ordIncome - std);
+  const usedStd = Math.min(std, ordIncome);
+  const gainsTaxable = Math.max(0, gains - (std - usedStd));
+  const fed = bracketTax(ordinaryTaxable, brackets) + ltcgTax(gainsTaxable, ordinaryTaxable, ltcgBr);
+  const stateRate = (+o.stateRate || 0) / 100;
+  const state = Math.max(0, agi - std) * stateRate;
+  let fica = 0;
+  if (o.isWorking && wages > 0) fica = Math.min(wages, TAX.ficaWageBase * f) * TAX.ficaSS + wages * TAX.ficaMed;
+  return {
+    fed, state, fica, total: fed + state + fica, agi, ssTaxable, gains,
+    taxableIncome: ordinaryTaxable + gainsTaxable, ordinaryTaxable,
+    marginal: marginalRate(ordinaryTaxable, brackets), brackets, std
+  };
+}
+
+/* ----------------------------- life events -------------------------------- */
+/* Recurring/one-time cash effects of scenario events for a given year. */
+function applyEventsYear(events, age, t, infl) {
+  let cashIn = 0, cashOut = 0; const g = pow(1 + infl, t);
+  (events || []).forEach(ev => {
+    const amt = +ev.amount || 0;
+    const startAge = +ev.startAge || 0, years = +ev.years || 1, atAge = +ev.atAge || startAge;
+    switch (ev.type) {
+      case 'child': case 'college': case 'ltc': case 'expenseRecurring':
+        if (age >= startAge && age < startAge + years) cashOut += amt * g; break;
+      case 'income':
+        if (age >= startAge && age < startAge + years) cashIn += amt * g; break;
+      case 'expense':
+        if (age === atAge) cashOut += amt * g; break;
+      case 'windfall':
+        if (age === atAge) cashIn += amt * g; break;
+    }
+  });
+  return { in: cashIn, out: cashOut };
+}
+function rothConversionYear(S, ctx) {
+  const rs = S.rothStrategy; if (!rs || !rs.on) return 0;
+  const { age, bDef, filing, inflFac, pension, ss, rmd } = ctx;
+  if (age < (+rs.startAge || 0) || age > (+rs.endAge || 200) || bDef <= 0) return 0;
+  if (rs.mode === 'amount') return Math.min(+rs.amount || 0, bDef);
+  const brackets = TAX.brackets[filingOf(filing)].map(([lo, r]) => [lo * inflFac, r]);
+  const std = TAX.std[filingOf(filing)] * inflFac;
+  const top = bracketTopFor(parseFloat(rs.toRate || 0.24), brackets);
+  const ssTax = ssTaxablePortion(ss, pension + rmd, filing);
+  const curOrd = Math.max(0, pension + rmd + ssTax - std);
+  return Math.min(Math.max(0, top - curOrd), bDef);
+}
+function sequenceWithdrawals(W, bTax, bDef, bRoth, basis) {
+  let rem = Math.max(0, W);
+  const wTax = Math.min(bTax, rem); rem -= wTax;
+  const wDef = Math.min(bDef, rem); rem -= wDef;
+  const wRoth = Math.min(bRoth, rem); rem -= wRoth;
+  const gainFrac = bTax > 0 ? Math.max(0, bTax - basis) / bTax : 0;
+  return { wTax, wDef, wRoth, gain: wTax * gainFrac, shortfall: rem };
+}
+
+/* ----------------------------- projection simulation ---------------------- */
+function simulate(S) {
+  const A = S.assumptions, H = S.household, I = S.income, E = S.expenses, SV = S.savings;
+  const infl = A.inflation / 100, pre = A.preReturn / 100, post = A.postReturn / 100,
+        salg = (+I.salaryGrowth || 0) / 100, cola = (+A.ssCola || 0) / 100;
+  const stateRate = +A.stateTaxRate || 0, divYield = (A.dividendYield != null ? +A.dividendYield : 1.8) / 100;
+  const filing = H.filing || 'married';
+  const c = H.client, sp = H.spouse, spOn = !!sp.included;
+  const curAge = +c.age || 0, clientRet = +c.retireAge || 65, life = +c.lifeExpectancy || 92;
+  const spAge0 = +sp.age || curAge, spRet = +sp.retireAge || 65, spLife = +sp.lifeExpectancy || life;
+  const endAge = Math.max(life, spOn ? spLife : life);
+  const rmdAge = +A.rmdStartAge || 73;
+  const ssClaimC = +I.ssClaimClient || clientRet, ssClaimS = +I.ssClaimSpouse || spRet;
+  const curYear = new Date().getFullYear();
+
+  const by = {}; (S.assets || []).forEach(a => by[a.type] = (by[a.type] || 0) + (+a.balance || 0));
+  let bTax = (by.cash || 0) + (by.taxable || 0) + (by.other || 0);
+  let bDef = (by.traditional || 0), bRoth = (by.roth || 0);
+  let basis = ((A.taxableBasisPct != null ? +A.taxableBasisPct : 60) / 100) * bTax;
+  const reStatic = by.realestate || 0, eduStatic = by.education || 0;
+
+  const split = S.savingsSplit || { pretax: 70, roth: 15, taxable: 15 };
+  const totSplit = (+split.pretax || 0) + (+split.roth || 0) + (+split.taxable || 0) || 1;
+  let debts = (S.liabilities || []).map(l => ({ type: l.type, bal: +l.balance || 0, rate: (+l.rate || 0) / 100, pay: (+l.payment || 0) * 12 }));
+  const baseExp = +E.annualExpenses || 0, retPct = (+E.retirementExpensePct || 100) / 100;
+  const events = S.events || [];
+
+  const rows = []; let depletionAge = null, lifetimeTax = 0, lifetimeFedTax = 0, lifetimeStateTax = 0;
+
+  for (let age = curAge; age <= endAge; age++) {
+    const t = age - curAge, year = curYear + t;
+    const inflFac = pow(1 + infl, Math.max(0, year - TAX.baseYear)), g = pow(1 + infl, t);
+    const spNow = spAge0 + t;
+    const clientWorking = age < clientRet, spouseWorking = spOn && spNow < spRet, anyWorking = clientWorking || spouseWorking;
+    const retired = age >= clientRet, growRate = retired ? post : pre;
+
+    /* one-time balance/debt events */
+    events.forEach(ev => {
+      if (ev.type === 'downturn' && age === (+ev.atAge || 0)) { const k = 1 - (+ev.amount || 0) / 100; bTax *= k; bDef *= k; bRoth *= k; basis *= k; }
+      if (ev.type === 'mortgagePayoff' && age === (+ev.atAge || 0)) { debts.forEach(d => { if (d.type === 'mortgage' && d.bal > 0) { bTax -= d.bal; d.bal = 0; } }); }
+    });
+
+    /* income */
+    let wages = 0;
+    if (clientWorking) wages += (+I.clientSalary || 0) * pow(1 + salg, t);
+    if (spouseWorking) wages += (+I.spouseSalary || 0) * pow(1 + salg, t);
+    const otherInc = anyWorking ? (+I.otherIncome || 0) * g : 0;
+    let ss = 0;
+    if (age >= ssClaimC) ss += (+I.ssClient || 0) * pow(1 + cola, t);
+    if (spOn && spNow >= ssClaimS) ss += (+I.ssSpouse || 0) * pow(1 + cola, t);
+    const pension = retired ? (+I.pension || 0) * g : 0;
+    const qualDiv = bTax * divYield;
+
+    /* contributions */
+    let cPretax = 0, cRoth = 0, cTaxable = 0, match = 0;
+    if (anyWorking) {
+      const sav = (+SV.annualSavings || 0) * pow(1 + salg, t);
+      cPretax = sav * ((+split.pretax || 0) / totSplit);
+      cRoth = sav * ((+split.roth || 0) / totSplit);
+      cTaxable = sav * ((+split.taxable || 0) / totSplit);
+      match = (+SV.employerMatch || 0) * pow(1 + salg, t);
+    }
+
+    /* spending need */
+    const ev = applyEventsYear(events, age, t, infl);
+    const expenses = baseExp * (retired ? retPct : 1) * g;
+    let debtPay = 0;
+    debts.forEach(d => { if (d.bal > 0.01) { const interest = d.bal * d.rate; const pay = Math.min(Math.max(d.pay, interest), d.bal + interest); d.bal = Math.max(0, d.bal - (pay - interest)); debtPay += pay; } });
+    const need = expenses + debtPay + ev.out;
+
+    let rmd = (age >= rmdAge && bDef > 0) ? bDef / rmdDivisor(age) : 0;
+    let conversion = rothConversionYear(S, { age, bDef, filing, inflFac, pension, ss, rmd });
+
+    const row = { age, t, year, phase: anyWorking ? 'work' : 'retire', wages, ss, pension, rmd, conversion, expenses, need };
+    let taxes, wT = 0, wD = 0, wR = 0, gain = 0;
+
+    if (anyWorking) {
+      taxes = computeTax({ wages, pretax: cPretax, pension, taxableInterest: 0, qualDiv, ss, filing, stateRate, inflFac, isWorking: true });
+      bDef += cPretax + match; bRoth += cRoth; bTax += cTaxable + qualDiv; basis += cTaxable + qualDiv;
+      if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
+      const netCash = wages + otherInc + ss + pension + ev.in - taxes.total - need - cPretax - cRoth - cTaxable;
+      if (netCash >= 0) { bTax += netCash; basis += netCash; }
+      else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
+      bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
+    } else {
+      bDef -= rmd;
+      if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
+      const guaranteed = ss + pension + ev.in;
+      let W = Math.max(0, need - guaranteed - rmd), seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis);
+      for (let i = 0; i < 8; i++) {
+        const tx = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmd + conversion, ss, ltcgRealized: seq.gain, filing, stateRate, inflFac, isWorking: false });
+        const newW = Math.max(0, need - guaranteed - rmd + tx.total);
+        seq = sequenceWithdrawals(newW, bTax, bDef, bRoth, basis);
+        if (Math.abs(newW - W) < 25) { W = newW; break; } W = newW;
+      }
+      taxes = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmd + conversion, ss, ltcgRealized: seq.gain, filing, stateRate, inflFac, isWorking: false });
+      const before = bTax; bTax -= seq.wTax; if (before > 0) basis *= bTax / before; bDef -= seq.wDef; bRoth -= seq.wRoth;
+      wT = seq.wTax + 0; wD = seq.wDef + rmd; wR = seq.wRoth; gain = seq.gain;
+      bTax += qualDiv; basis += qualDiv;
+      const surplus = guaranteed + rmd - need - taxes.total;
+      if (surplus > 0) { bTax += surplus; basis += surplus; }
+      if (seq.shortfall > 1 && depletionAge === null) depletionAge = age;
+      bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
+    }
+    if (bTax < 0) bTax = 0; if (bDef < 0) bDef = 0; if (bRoth < 0) bRoth = 0;
+    if (basis < 0) basis = 0; if (basis > bTax) basis = bTax;
+    const portfolio = bTax + bDef + bRoth, totalDebt = debts.reduce((s, d) => s + d.bal, 0);
+    if (portfolio <= 1 && retired && depletionAge === null) depletionAge = age;
+    lifetimeTax += taxes.total; lifetimeFedTax += taxes.fed; lifetimeStateTax += taxes.state;
+    Object.assign(row, {
+      taxes: taxes.total, fed: taxes.fed, state: taxes.state, fica: taxes.fica, agi: taxes.agi,
+      taxableIncome: taxes.taxableIncome, ordinaryTaxable: taxes.ordinaryTaxable, marginal: taxes.marginal, ssTaxable: taxes.ssTaxable,
+      contribution: retired ? 0 : (cPretax + cRoth + cTaxable + match), withdrawal: retired ? (wT + wD + wR) : (wT + wD + wR),
+      wTax: wT, wDef: wD, wRoth: wR, bTax, bDef, bRoth, end: portfolio, debt: totalDebt,
+      reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + ss + pension,
+      cumTax: lifetimeTax
+    });
+    rows.push(row);
+  }
+  return { rows, endingBalance: rows.length ? rows[rows.length - 1].end : 0, depletionAge, lifetimeTax, lifetimeFedTax, lifetimeStateTax };
+}
 
 /* ----------------------------- compute engine ----------------------------- */
 function computeGoal(g, ctx) {
@@ -179,26 +438,11 @@ function compute(S) {
   const shortfallFV = Math.max(0, capitalNeeded - projAtRet);
   const extraMonthly = pmtForFV(shortfallFV, pre, yearsToRet) / 12;
 
-  /* year-by-year simulation (source of truth for depletion + cash flow) */
-  const rows = []; let bal = investable; let depletionAge = null;
-  for (let age = curAge; age <= endAge; age++) {
-    const t = age - curAge, retired = age >= retAge;
-    const expenses = annualExp * (retired ? ((+E.retirementExpensePct || 100) / 100) : 1) * pow(1 + infl, t);
-    const grow = retired ? post : pre; const start = bal;
-    if (!retired) {
-      const sf = pow(1 + salg, t);
-      const income = ((+I.clientSalary || 0) + (spOn ? (+I.spouseSalary || 0) : 0)) * sf + (+I.otherIncome || 0);
-      const taxes = income * tax, contribution = annualSavings * sf;
-      bal = start * (1 + grow) + contribution;
-      rows.push({ age, t, phase: 'work', income, expenses, taxes, contribution, withdrawal: 0, start, growth: start * grow, end: bal, surplus: income - taxes - expenses - contribution });
-    } else {
-      const guaranteed = guaranteedToday * pow(1 + infl, t);
-      const net = Math.max(0, expenses - guaranteed), taxes = net * tax * deferredFrac, gross = net + taxes;
-      bal = start * (1 + grow) - gross; if (bal < 0 && depletionAge === null) depletionAge = age; if (bal < 0) bal = 0;
-      rows.push({ age, t, phase: 'retire', income: guaranteed, expenses, taxes, contribution: 0, withdrawal: gross, start, growth: start * grow, end: bal, surplus: guaranteed - expenses - taxes });
-    }
-  }
-  const endingBalance = bal;
+  /* year-by-year simulation (taxes, three tax buckets, debt amortization, RMDs, events) */
+  const sim = simulate(S);
+  const rows = sim.rows;
+  const endingBalance = sim.endingBalance;
+  const depletionAge = sim.depletionAge;
 
   /* quick education needs */
   const QE = S.quickEducation || {};
@@ -237,7 +481,9 @@ function compute(S) {
     cash, taxable, trad, roth, eduAssets, re, investable, grossIncome, annualExp, retExpToday, annualSavings,
     savingsRate, emergencyMonths, guaranteedToday, projAtRet, needAtRet, guaranteedAtRet, capitalNeeded,
     fundedRatio, surplus, shortfallFV, extraMonthly, rows, endingBalance, depletionAge, eduFuture, eduProjected,
-    eduGap, eduFundedRatio, eduReqMonthly, cInc, sInc, totalProtNeed, existingLife, protGap, goals, alloc, spOn };
+    eduGap, eduFundedRatio, eduReqMonthly, cInc, sInc, totalProtNeed, existingLife, protGap, goals, alloc, spOn,
+    lifetimeTax: sim.lifetimeTax, lifetimeFedTax: sim.lifetimeFedTax, lifetimeStateTax: sim.lifetimeStateTax,
+    taxNow: rows[0] || {}, planLastsToLife: depletionAge == null };
 }
 
 /* ----------------------------- insights (CoPlanner) ----------------------- */
@@ -486,11 +732,15 @@ function assetRow(a, i) {
     <button class="rr-del" data-action="del-asset" data-idx="${i}" title="Remove">×</button></div>`;
 }
 function liabRow(l, i) {
-  return `<div class="repeat-row" style="grid-template-columns:1fr 120px 110px 26px">
+  return `<div class="repeat-row" style="grid-template-columns:1fr 110px 26px">
     <input type="text" data-arr="liabilities" data-idx="${i}" data-key="name" value="${escapeAttr(l.name)}" placeholder="Liability">
     <select data-arr="liabilities" data-idx="${i}" data-key="type">${typeOpts(LIAB_TYPES, l.type)}</select>
-    <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="liabilities" data-idx="${i}" data-key="balance" data-vtype="currency" value="${l.balance}"></div>
-    <button class="rr-del" data-action="del-liab" data-idx="${i}" title="Remove">×</button></div>`;
+    <button class="rr-del" data-action="del-liab" data-idx="${i}" title="Remove">×</button>
+    <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem">
+      <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="liabilities" data-idx="${i}" data-key="balance" data-vtype="currency" value="${l.balance}" title="Balance"></div>
+      <div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="liabilities" data-idx="${i}" data-key="rate" data-vtype="percent" value="${l.rate || 0}" title="Interest rate"><span class="suffix">%</span></div>
+      <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="50" min="0" data-arr="liabilities" data-idx="${i}" data-key="payment" data-vtype="currency" value="${l.payment || 0}" title="Monthly payment"></div>
+    </div></div>`;
 }
 function goalRow(g, i) {
   const isMgmt = g.type === 'retirement' || g.type === 'protection';
@@ -507,6 +757,30 @@ function goalRow(g, i) {
           `<div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="goals" data-idx="${i}" data-key="funded" data-vtype="currency" value="${g.funded || 0}" title="Already saved"></div>`}
         <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="50" min="0" data-arr="goals" data-idx="${i}" data-key="monthly" data-vtype="currency" value="${g.monthly || 0}" title="Monthly savings"></div>
       </div>`}</div>`;
+}
+
+const EVENT_TYPES = [['child', 'Child / dependent'], ['college', 'College funding'], ['expenseRecurring', 'Recurring expense'], ['income', 'Extra income'], ['expense', 'One-time expense'], ['windfall', 'Windfall / inheritance'], ['ltc', 'Long-term care'], ['downturn', 'Market downturn'], ['mortgagePayoff', 'Pay off mortgage']];
+function eventRow(ev, i) {
+  const recurring = ['child', 'college', 'ltc', 'income', 'expenseRecurring'].includes(ev.type);
+  const oneTime = ['expense', 'windfall'].includes(ev.type);
+  const isDown = ev.type === 'downturn', isPayoff = ev.type === 'mortgagePayoff';
+  let fields;
+  if (recurring) fields = `
+    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="startAge" value="${ev.startAge || 0}" title="Begins at client age" placeholder="Age">
+    <input type="number" min="1" data-arr="events" data-idx="${i}" data-key="years" value="${ev.years || 1}" title="For how many years" placeholder="Yrs">
+    <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="currency" value="${ev.amount || 0}" title="Amount per year (today's $)"></div>`;
+  else if (oneTime) fields = `
+    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
+    <div class="control has-prefix" style="grid-column:span 2"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="currency" value="${ev.amount || 0}" title="Amount (today's $)"></div>`;
+  else if (isDown) fields = `
+    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
+    <div class="control has-suffix" style="grid-column:span 2"><input type="number" min="0" max="90" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="percent" value="${ev.amount || 0}" title="One-year portfolio decline"><span class="suffix">% drop</span></div>`;
+  else fields = `<input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age"><div style="grid-column:span 2;font-size:.72rem;color:var(--faint);align-self:center">Remaining mortgage paid from savings</div>`;
+  return `<div class="repeat-row" style="grid-template-columns:1fr 26px">
+    <input type="text" data-arr="events" data-idx="${i}" data-key="label" value="${escapeAttr(ev.label || '')}" placeholder="Event name">
+    <button class="rr-del" data-action="del-event" data-idx="${i}" title="Remove">×</button>
+    <select style="grid-column:1/-1" data-arr="events" data-idx="${i}" data-key="type">${EVENT_TYPES.map(([v, l]) => `<option value="${v}" ${v === ev.type ? 'selected' : ''}>${l}</option>`).join('')}</select>
+    <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem">${fields}</div></div>`;
 }
 
 /* ----------------------------- save / plans ------------------------------- */
@@ -580,12 +854,13 @@ function headBlock(eyebrow, title, sub, extra = '') {
 }
 function ensureDefaults(S) {
   const d = defaultState();
-  ['meta', 'income', 'expenses', 'savings', 'insurance', 'protection', 'assumptions', 'quickEducation'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
+  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
   S.household = S.household || d.household;
   S.household.client = Object.assign({}, d.household.client, S.household.client);
   S.household.spouse = Object.assign({}, d.household.spouse, S.household.spouse);
   S.assets = S.assets || []; S.liabilities = S.liabilities || [];
   S.goals = (S.goals && S.goals.length) ? S.goals : d.goals;
+  S.events = S.events || [];
   if (S.advisorNotes == null) S.advisorNotes = '';
   S.presentation = Object.assign({ hidden: {} }, S.presentation);
   S.quickRetire = Object.assign({ age: S.household.client.age, retireAge: S.household.client.retireAge, lifeExpectancy: S.household.client.lifeExpectancy, currentSavings: 300000, monthlySavings: 1500, desiredAnnualIncome: 90000, socialSecurity: 30000 }, S.quickRetire);
@@ -660,10 +935,13 @@ function buildProfile() {
       ${spOn ? fieldRow({ path: 'income.otherIncome', label: 'Other income', type: 'currency' }, { path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' }) : field({ path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' })}
       ${sectionLabel('Guaranteed retirement income (annual, today’s $)')}
       ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', type: 'currency' }, spOn ? { path: 'income.ssSpouse', label: 'Social Security — spouse', type: 'currency' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
+      ${fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, spOn ? { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
       ${spOn ? field({ path: 'income.pension', label: 'Pension', type: 'currency' }) : ''}`) +
     panel('Expenses & Savings', `
       ${fieldRow({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' }, { path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today', type: 'percent' })}
-      ${fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' })}`) +
+      ${fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' })}
+      ${sectionLabel('Where new savings go (tax treatment)')}
+      ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k/IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`) +
     panel('Assets', `<div id="assetsList">${(STATE.assets || []).map(assetRow).join('')}</div>
       <button class="add-row" data-action="add-asset">＋ Add account</button>`, { sub: 'Investable, education & property' }) +
     panel('Liabilities', `<div id="liabList">${(STATE.liabilities || []).map(liabRow).join('')}</div>
@@ -677,13 +955,14 @@ function buildProfile() {
     panel('Planning Assumptions', `
       ${fieldRow({ path: 'assumptions.inflation', label: 'Inflation', type: 'percent' }, { path: 'assumptions.ssCola', label: 'SS / COLA', type: 'percent' })}
       ${fieldRow({ path: 'assumptions.preReturn', label: 'Return — pre-retire', type: 'percent' }, { path: 'assumptions.postReturn', label: 'Return — in retire', type: 'percent' })}
-      ${fieldRow({ path: 'assumptions.eduInflation', label: 'Education inflation', type: 'percent' }, { path: 'assumptions.effectiveTaxRate', label: 'Effective tax rate', type: 'percent' })}`) +
+      ${fieldRow({ path: 'assumptions.eduInflation', label: 'Education inflation', type: 'percent' }, { path: 'assumptions.stateTaxRate', label: 'State income tax', type: 'percent' })}
+      ${fieldRow({ path: 'assumptions.rmdStartAge', label: 'RMD start age', type: 'age' }, { path: 'assumptions.dividendYield', label: 'Taxable acct yield', hint: 'dividends', type: 'percent' })}`) +
     panel('Advisor Notes', `<div class="advisor-flag" style="margin-bottom:.5rem">Private — never shown to client</div>
       ${field({ path: 'advisorNotes', label: '', type: 'textarea', rows: 6, ph: 'Confidential notes, meeting follow-ups, strategy reminders…' })}`, { cls: 'advisor-only' });
 
   getViewEl('profile').innerHTML = headBlock('Foundation', 'Client Profile',
     'Capture the household’s full financial picture. Everything here powers the plan, charts, and client reports.') +
-    `<div class="split"><div>${left}</div><div id="res-profile"></div></div>`;
+    `<div class="profile-layout"><div class="input-cols">${left}</div><aside class="rail"><div id="res-profile"></div></aside></div>`;
 }
 function liveProfile() {
   const R = RESULTS;
@@ -765,7 +1044,7 @@ function liveNeeds() {
 function buildCashflow() {
   getViewEl('cashflow').innerHTML = headBlock('Plan', 'Goals & Cash Flow',
     'Combine goals-based funding with comprehensive, year-by-year cash flow — the right conversation at the right time.') +
-    `<div class="split"><div class="advisor-only">
+    `<div class="split"><div class="advisor-only io-inputs">
       ${panel('Goals', `<div id="goalsList">${(STATE.goals || []).map(goalRow).join('')}</div><button class="add-row" data-action="add-goal">＋ Add goal</button>`,
         { sub: 'Funding tracker' })}
     </div><div id="res-cashflow"></div></div>`;
@@ -854,16 +1133,32 @@ function applyScenario(base) {
   return s;
 }
 function buildDecision() {
+  const addBtns = `<div class="btn-row" style="margin-top:.6rem">
+    <button class="btn sm" data-action="add-event" data-type="child">＋ Child</button>
+    <button class="btn sm" data-action="add-event" data-type="college">＋ College</button>
+    <button class="btn sm" data-action="add-event" data-type="windfall">＋ Inheritance</button>
+    <button class="btn sm" data-action="add-event" data-type="expense">＋ Major purchase</button>
+    <button class="btn sm" data-action="add-event" data-type="income">＋ Extra income</button>
+    <button class="btn sm" data-action="add-event" data-type="ltc">＋ Long-term care</button>
+    <button class="btn sm" data-action="add-event" data-type="downturn">＋ Market downturn</button>
+    <button class="btn sm" data-action="add-event" data-type="mortgagePayoff">＋ Pay off mortgage</button></div>`;
   getViewEl('decision').innerHTML = headBlock('Advanced', 'Decision Center',
-    'Model what-ifs live with your client. Move a lever and watch the plan respond — designed for interactive, collaborative conversations.') +
-    `<div class="panel pad" style="margin-bottom:1.1rem"><div class="grid cols-3">
-      ${slider('retireDelta', 'Retirement age', -5, 5, 1)}
-      ${slider('savingsMult', 'Monthly savings', 0.5, 2, 0.05)}
-      ${slider('returnDelta', 'Investment return', -2, 2, 0.1)}
-      ${slider('spendDelta', 'Retirement spending', -20, 20, 1)}
-      ${slider('ssDelta', 'Social Security', -30, 30, 5)}
-      <div style="display:flex;align-items:flex-end"><button class="btn ghost" data-action="reset-scenario">↺ Reset levers</button></div>
-    </div></div><div id="res-decision"></div>`;
+    'Model life events and what-ifs live with your client. Add an event or move a lever and watch the plan respond — built for interactive, collaborative conversations.') +
+    `<div class="panel pad" style="margin-bottom:1.1rem">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:.7rem">
+        <h3 style="font-family:var(--ff);font-size:1.3rem;font-weight:600">What-If Levers</h3>
+        <button class="btn ghost sm" data-action="reset-scenario">↺ Reset levers</button></div>
+      <div class="grid cols-3">
+        ${slider('retireDelta', 'Retirement age', -5, 5, 1)}
+        ${slider('savingsMult', 'Monthly savings', 0.5, 2, 0.05)}
+        ${slider('returnDelta', 'Investment return', -2, 2, 0.1)}
+        ${slider('spendDelta', 'Retirement spending', -20, 20, 1)}
+        ${slider('ssDelta', 'Social Security benefit', -30, 30, 5)}
+      </div></div>
+    <div id="res-decision"></div>
+    <div style="height:1.1rem"></div>
+    <div class="advisor-only">${panel('Life Events', `<p class="view-sub" style="margin-top:0;margin-bottom:.6rem">Events are built into the plan and flow through every projection, chart, and the cash-flow timeline.</p>
+      <div id="eventsList">${(STATE.events || []).map(eventRow).join('')}</div>${addBtns}`, { sub: 'Planned' })}</div>`;
 }
 function cmpRow(label, b, a, fmt, higherBetter = true) {
   const diff = a - b, improved = higherBetter ? diff > 0 : diff < 0;
@@ -914,15 +1209,113 @@ function miniMetric(label, val, t) {
     <span style="font-size:.84rem;color:var(--muted)">${escapeHtml(label)}</span><b class="amount val-${t}">${val}</b></div>`;
 }
 
+/* ----------------------------- TAX PLANNING ------------------------------- */
+function taxBracketBar(income, brackets, marginal) {
+  let idx = 0; for (let i = 0; i < brackets.length; i++) if (income >= brackets[i][0]) idx = i;
+  const showTop = idx + 2 < brackets.length ? brackets[idx + 2][0] : (idx + 1 < brackets.length ? brackets[idx + 1][0] * 1.25 : Math.max(income * 1.4, 1));
+  const W = 760, H = 76, x0 = 6, x1 = W - 6, sc = v => x0 + Math.min(v, showTop) / showTop * (x1 - x0);
+  const colors = ['#d7e6df', '#c3dccf', '#ecd6a8', '#e0c88f', '#d3a96a', '#c5923f', '#a9701c'];
+  let segs = '';
+  for (let i = 0; i < brackets.length; i++) {
+    const lo = brackets[i][0], hi = i + 1 < brackets.length ? brackets[i + 1][0] : showTop;
+    if (lo >= showTop) break;
+    const a = sc(lo), b = sc(hi);
+    segs += `<rect x="${a.toFixed(1)}" y="26" width="${(b - a).toFixed(1)}" height="24" fill="${colors[i]}"/>`;
+    segs += `<text class="lbl" x="${a + 3}" y="64" style="font-weight:600">${Math.round(brackets[i][1] * 100)}%</text>`;
+    if (i > 0) segs += `<text class="lbl" x="${a}" y="20" text-anchor="middle">${fmtK(lo)}</text>`;
+  }
+  const fx = sc(income);
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}">${segs}
+    <rect x="${x0}" y="26" width="${(fx - x0).toFixed(1)}" height="24" fill="rgba(15,26,43,.20)"/>
+    <line x1="${fx.toFixed(1)}" y1="18" x2="${fx.toFixed(1)}" y2="54" stroke="var(--ink)" stroke-width="2.5"/>
+    <text class="lbl-strong amount" x="${clamp(fx, 60, W - 60).toFixed(1)}" y="14" text-anchor="middle">Taxable income ${fmtK(income)}</text></svg>`;
+}
+function buildTax() {
+  const rothControls =
+    toggleField('rothStrategy.on', 'Apply Roth conversion strategy to the plan') +
+    fieldRow(
+      { path: 'rothStrategy.mode', label: 'Method', type: 'select', options: [{ value: 'fill', label: 'Fill up to a bracket' }, { value: 'amount', label: 'Fixed amount / year' }] },
+      { path: 'rothStrategy.toRate', label: 'Target bracket', type: 'select', options: [{ value: 0.12, label: '12%' }, { value: 0.22, label: '22%' }, { value: 0.24, label: '24%' }, { value: 0.32, label: '32%' }] }
+    ) +
+    fieldRow({ path: 'rothStrategy.startAge', label: 'Convert from age', type: 'age' }, { path: 'rothStrategy.endAge', label: 'through age', type: 'age' }) +
+    field({ path: 'rothStrategy.amount', label: 'Amount / year (fixed mode)', type: 'currency' });
+  const taxAssumptions =
+    fieldRow(
+      { path: 'household.filing', label: 'Filing status', type: 'select', options: [{ value: 'married', label: 'Married jointly' }, { value: 'single', label: 'Single' }, { value: 'hoh', label: 'Head of household' }] },
+      { path: 'assumptions.stateTaxRate', label: 'State income tax', type: 'percent' }
+    ) +
+    fieldRow({ path: 'savingsSplit.pretax', label: 'Savings to pre-tax', type: 'percent' }, { path: 'savingsSplit.roth', label: 'to Roth', type: 'percent' }) +
+    fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, STATE.household.spouse.included ? { path: 'income.ssClaimSpouse', label: 'SS claim — spouse', type: 'age' } : { path: 'assumptions.rmdStartAge', label: 'RMD start age', type: 'age' });
+  getViewEl('tax').innerHTML = headBlock('Tax Strategy', 'Tax Planning',
+    'See the tax impact of the plan in real time — current brackets, lifetime taxes, RMDs, and bracket-based Roth conversions. Estimates to guide the conversation and the client’s CPA.') +
+    `<div class="split"><div class="advisor-only io-inputs">
+      ${panel('Tax Inputs', taxAssumptions, { sub: 'Drives every projection' })}
+      ${panel('Roth Conversion Analyzer', rothControls, { sub: 'What-if' })}
+    </div><div id="res-tax"></div></div>`;
+}
+function liveTax() {
+  const el = $('#res-tax'); if (!el) return;
+  const R = RESULTS, A = STATE.assumptions, filing = filingOf(STATE.household.filing);
+  const infl = A.inflation / 100, curYear = new Date().getFullYear();
+  const inflFac0 = pow(1 + infl, Math.max(0, curYear - TAX.baseYear));
+  const brackets0 = TAX.brackets[filing].map(([lo, r]) => [lo * inflFac0, r]);
+  const now = R.taxNow || {};
+  const ordTaxable = now.ordinaryTaxable || 0;
+  let idx = 0; for (let i = 0; i < brackets0.length; i++) if (ordTaxable >= brackets0[i][0]) idx = i;
+  const nextTop = idx + 1 < brackets0.length ? brackets0[idx + 1][0] : Infinity;
+  const room = isFinite(nextTop) ? nextTop - ordTaxable : 0;
+  const grossNow = (now.wages || 0) + (now.ss || 0) + (now.pension || 0) + (now.rmd || 0);
+  // Roth comparison (always show the impact of the configured strategy)
+  const offPlan = JSON.parse(JSON.stringify(STATE)); offPlan.rothStrategy = Object.assign({}, STATE.rothStrategy, { on: false });
+  const onPlan = JSON.parse(JSON.stringify(STATE)); onPlan.rothStrategy = Object.assign({}, STATE.rothStrategy, { on: true });
+  const baseSim = simulate(offPlan), stratSim = simulate(onPlan);
+  const taxSaved = baseSim.lifetimeTax - stratSim.lifetimeTax;
+  const endDelta = stratSim.endingBalance - baseSim.endingBalance;
+  const convTotal = stratSim.rows.reduce((s, r) => s + (r.conversion || 0), 0);
+  // lifetime + RMD series
+  const taxSeries = { name: 'Annual taxes', color: 'var(--gold)', fill: 'var(--gold)', points: R.rows.map(r => ({ x: r.age, y: r.taxes })) };
+  const rmdRows = R.rows.filter(r => r.rmd > 0);
+  const rmdSeries = { name: 'RMD', color: 'var(--ink)', fill: 'var(--ink)', points: rmdRows.map(r => ({ x: r.age, y: r.rmd })) };
+
+  el.innerHTML =
+    `<div class="grid cols-4" style="margin-bottom:1rem">
+      ${statCard('Tax This Year', fmt$(now.taxes || 0), { tone: 'warn', note: `${money(now.fed || 0)} fed · ${money(now.state || 0)} state · ${money(now.fica || 0)} FICA` })}
+      ${statCard('Effective Rate', pct(grossNow > 0 ? (now.taxes / grossNow) * 100 : 0, 1), { raw: true, note: 'of gross income' })}
+      ${statCard('Marginal Bracket', pct((now.marginal || 0) * 100, 0), { raw: true, valClass: 'val-gold', note: `${money(room)} room in bracket` })}
+      ${statCard('Lifetime Taxes', fmtK(R.lifetimeTax), { tone: 'bad', note: 'projected total, all years' })}
+    </div>
+    ${panel('Federal Tax Bracket — This Year', taxBracketBar(ordTaxable, brackets0, now.marginal) +
+      `<p class="i-action">You are in the <b>${pct((now.marginal || 0) * 100, 0)}</b> marginal bracket with about <b class="amount">${fmt$(room)}</b> of room before the next bracket — useful headroom for Roth conversions or realizing gains. <span class="advisor-flag" style="margin-left:.4rem">${STATE.household.filing} · ${curYear}</span></p>`, { hideKey: 'tax-bracket' })}
+    <div style="height:1.1rem"></div>
+    <div class="split" style="grid-template-columns:1fr 1fr;align-items:start">
+      ${panel('Lifetime Tax Projection', lineChart([taxSeries], { markers: [{ x: R.retAge, label: 'Retire' }], h: 220 }) +
+        `<div class="legend"><span><i class="dot" style="background:var(--gold)"></i>Annual taxes paid</span><span>Cumulative: <b class="amount">${fmt$(R.lifetimeTax)}</b></span></div>`, { hideKey: 'tax-life' })}
+      ${panel('Required Minimum Distributions', rmdRows.length ? lineChart([rmdSeries], { h: 220 }) +
+        `<p class="i-action">RMDs begin at age <b>${A.rmdStartAge}</b> from tax-deferred accounts — forced taxable income of about <b class="amount">${fmt$(rmdRows[0].rmd)}</b> in year one, rising with age.</p>`
+        : '<div class="empty">No RMDs projected (limited tax-deferred balances).</div>', { hideKey: 'tax-rmd' })}
+    </div>
+    <div style="height:1.1rem"></div>
+    ${panel('Roth Conversion Analyzer', `
+      <p class="view-sub" style="margin-top:0">Converting tax-deferred dollars to Roth now — filling up the ${STATE.rothStrategy.mode === 'fill' ? pct(parseFloat(STATE.rothStrategy.toRate) * 100, 0) + ' bracket' : 'fixed amount'} from age ${STATE.rothStrategy.startAge}–${STATE.rothStrategy.endAge} — trades tax today for lower RMDs and tax-free growth later.</p>
+      <div class="grid cols-3" style="margin:.9rem 0">
+        ${statCard('Total Converted', fmtK(convTotal), { note: 'over the strategy window' })}
+        ${statCard('Lifetime Tax Change', (taxSaved >= 0 ? '−' : '+') + fmtK(Math.abs(taxSaved)), { raw: true, tone: taxSaved >= 0 ? 'good' : 'bad', valClass: taxSaved >= 0 ? 'val-good' : 'val-bad', note: taxSaved >= 0 ? 'projected lifetime savings' : 'additional lifetime tax' })}
+        ${statCard('Ending Estate Change', (endDelta >= 0 ? '+' : '−') + fmtK(Math.abs(endDelta)), { raw: true, tone: endDelta >= 0 ? 'good' : 'bad', valClass: endDelta >= 0 ? 'val-good' : 'val-bad', note: 'projected portfolio at plan end' })}
+      </div>
+      <p class="rp-disclaimer" style="font-size:.78rem">${STATE.rothStrategy.on ? '✓ This strategy is currently applied to the plan.' : 'Toggle “Apply to the plan” on the left to build this into the projection.'} Roth conversion suitability depends on future tax rates, IRMAA, state taxes, and estate goals — review with the client’s CPA.</p>
+      `, { hideKey: 'tax-roth' })}
+    <p class="rp-disclaimer" style="margin-top:1rem">Tax figures are simplified estimates using ${curYear} federal brackets (inflated forward), a flat ${pct(A.stateTaxRate, 1)} state rate, and standard deductions. They exclude credits, AMT, NIIT, IRMAA, and many deductions. For tax preparation or advice, the client should consult their CPA.</p>`;
+}
+
 /* ----------------------------- view switching ----------------------------- */
-const builders = { profile: buildProfile, needs: buildNeeds, cashflow: buildCashflow, decision: buildDecision };
-const liveFns = { dashboard: renderDashboard, profile: liveProfile, needs: liveNeeds, cashflow: liveCashflow, foundational: renderFoundational, decision: liveDecision, coplanner: renderCoplanner };
+const builders = { profile: buildProfile, needs: buildNeeds, cashflow: buildCashflow, decision: buildDecision, tax: buildTax };
+const liveFns = { dashboard: renderDashboard, profile: liveProfile, needs: liveNeeds, cashflow: liveCashflow, foundational: renderFoundational, decision: liveDecision, tax: liveTax, coplanner: renderCoplanner };
 function showView(v) {
   if (presentMode) return showPresentView(v);
   currentView = v; document.body.dataset.view = v;
   $$('.navlink').forEach(n => n.classList.toggle('active', n.dataset.view === v));
   $$('.view').forEach(s => s.classList.toggle('active', s.dataset.view === v));
-  if (builders[v] && !built[v]) { builders[v](); built[v] = true; }
+  if (builders[v]) { builders[v](); built[v] = true; }   /* rebuild input scaffolding so shared fields stay in sync across modules */
   const f = liveFns[v]; if (f) f();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -956,7 +1349,7 @@ function recompute() {
 }
 
 /* ----------------------------- presentation ------------------------------- */
-const PRESENT_VIEWS = [['dashboard', 'Overview'], ['foundational', 'The Plan'], ['needs', 'Needs'], ['cashflow', 'Goals & Cash Flow'], ['decision', 'What-Ifs'], ['coplanner', 'Insights']];
+const PRESENT_VIEWS = [['dashboard', 'Overview'], ['foundational', 'The Plan'], ['needs', 'Needs'], ['cashflow', 'Goals & Cash Flow'], ['tax', 'Taxes'], ['decision', 'What-Ifs'], ['coplanner', 'Insights']];
 function clientNames() {
   const c = STATE.household.client.name || '', s = STATE.household.spouse.name || '';
   if (STATE.household.spouse.included && s) return `${c || 'Client'} & ${s}`;
@@ -978,7 +1371,7 @@ function exitPresent() {
 }
 function showPresentView(v) {
   currentView = v;
-  if (builders[v] && !built[v]) { builders[v](); built[v] = true; }
+  if (builders[v]) { builders[v](); built[v] = true; }   /* rebuild input scaffolding so shared fields stay in sync across modules */
   const f = liveFns[v]; if (f) f();
   $$('.view').forEach(s => s.classList.toggle('present-active', s.dataset.view === v));
   $$('#presentTabs .pt').forEach(t => t.classList.toggle('active', t.dataset.view === v));
@@ -999,7 +1392,7 @@ const closeSafe = () => { $('#safeScreen').hidden = true; };
 function openReport() { $('#reportControls').innerHTML = reportControlsHTML(); $('#reportModal').hidden = false; }
 function closeReport() { $('#reportModal').hidden = true; }
 function reportControlsHTML() {
-  const secs = [['summary', 'Plan summary & net worth'], ['retirement', 'Retirement outlook'], ['cashflow', 'Cash-flow projection'], ['goals', 'Goals funding'], ['needs', 'Needs analysis'], ['insights', 'CoPlanner insights'], ['disclosures', 'Important disclosures']];
+  const secs = [['summary', 'Plan summary & net worth'], ['retirement', 'Retirement outlook'], ['cashflow', 'Cash-flow projection'], ['tax', 'Tax planning'], ['goals', 'Goals funding'], ['needs', 'Needs analysis'], ['insights', 'CoPlanner insights'], ['disclosures', 'Important disclosures']];
   return `<div class="rep-opt"><input type="radio" name="repcopy" value="client" id="rc-client" checked>
       <div class="ro-text"><strong>Client copy</strong><span>Polished deliverable — excludes private advisor notes.</span></div></div>
     <div class="rep-opt"><input type="radio" name="repcopy" value="advisor" id="rc-advisor">
@@ -1045,6 +1438,20 @@ function buildReport(opts) {
       ${rows.map(r => { const flow = r.phase === 'work' ? r.contribution : -r.withdrawal; return `<tr><td style="text-align:left">${r.age}</td><td style="text-align:left">${r.phase === 'work' ? 'Working' : 'Retired'}</td><td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.expenses)}</td><td class="amount">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td><td class="amount">${fmtK(r.end)}</td></tr>`; }).join('')}
       </tbody></table><p class="rp-note">Values are nominal (future dollars), reflecting ${pct(STATE.assumptions.inflation, 1)} assumed inflation.</p>${rpFoot}</div>`);
   }
+  if (opts.tax) {
+    const now = R.taxNow || {}, grossNow = (now.wages || 0) + (now.ss || 0) + (now.pension || 0) + (now.rmd || 0);
+    const ages = new Set([R.curAge, R.retAge, +STATE.assumptions.rmdStartAge, R.life]);
+    for (let a = R.curAge; a <= R.endAge; a += 10) ages.add(a);
+    const taxRows = R.rows.filter(r => ages.has(r.age)).slice(0, 8);
+    pages.push(`<div class="report-page">${rpHead('Tax Planning')}
+      <div class="rp-grid">${rpStat('Tax This Year', fmt$(now.taxes || 0))}${rpStat('Effective Rate', pct(grossNow > 0 ? now.taxes / grossNow * 100 : 0, 1))}${rpStat('Marginal Bracket', pct((now.marginal || 0) * 100, 0))}${rpStat('Lifetime Taxes', fmtK(R.lifetimeTax))}</div>
+      <div class="rp-chart">${lineChart([{ name: 'tax', color: 'var(--gold)', fill: 'var(--gold)', points: R.rows.map(r => ({ x: r.age, y: r.taxes })) }], { markers: [{ x: R.retAge, label: 'Retire' }], w: 760, h: 150 })}</div>
+      <p class="rp-note">Projected lifetime taxes total <b>${fmt$(R.lifetimeTax)}</b> (${fmt$(R.lifetimeFedTax)} federal, ${fmt$(R.lifetimeStateTax)} state). RMDs begin at age ${STATE.assumptions.rmdStartAge}.</p>
+      <table class="rp-tbl"><thead><tr><th style="text-align:left">Age</th><th>AGI</th><th>Taxable</th><th>RMD</th><th>Total Tax</th><th>Marginal</th></tr></thead><tbody>
+      ${taxRows.map(r => `<tr><td style="text-align:left">${r.age}</td><td class="amount">${fmtK(r.agi)}</td><td class="amount">${fmtK(r.taxableIncome)}</td><td class="amount">${fmtK(r.rmd)}</td><td class="amount">${fmtK(r.taxes)}</td><td>${pct(r.marginal * 100, 0)}</td></tr>`).join('')}
+      </tbody></table>
+      <p class="rp-note" style="font-size:8pt">Simplified ${new Date().getFullYear()} estimates — not tax advice. See disclosures. Coordinate with the client’s CPA.</p>${rpFoot}</div>`);
+  }
   if (opts.goals) pages.push(`<div class="report-page">${rpHead('Goals Funding')}
     ${R.goals.map(g => `<div style="margin-bottom:10pt"><div style="display:flex;justify-content:space-between;font-size:10pt;font-weight:600"><span>${escapeHtml(g.name)} — ${g.priority || ''} priority</span><span class="amount">${fmtK(g.projected)} / ${fmtK(g.target)} · ${pct(g.ratio * 100, 0)}</span></div>
       <div style="height:8px;background:#eee;border-radius:99px;overflow:hidden;margin-top:3pt"><div style="height:100%;width:${clamp(g.ratio, 0, 1) * 100}%;background:${g.ratio >= 1 ? 'var(--good)' : g.ratio >= 0.8 ? 'var(--warn)' : 'var(--gold)'}"></div></div>
@@ -1073,6 +1480,7 @@ function doPrint() {
 const rebuildAssets = () => { const c = $('#assetsList'); if (c) c.innerHTML = (STATE.assets || []).map(assetRow).join(''); };
 const rebuildLiabs  = () => { const c = $('#liabList'); if (c) c.innerHTML = (STATE.liabilities || []).map(liabRow).join(''); };
 const rebuildGoals  = () => { const c = $('#goalsList'); if (c) c.innerHTML = (STATE.goals || []).map(goalRow).join(''); };
+const rebuildEvents = () => { const c = $('#eventsList'); if (c) c.innerHTML = (STATE.events || []).map(eventRow).join(''); };
 
 /* ----------------------------- actions ------------------------------------ */
 function handleAction(action, el) {
@@ -1088,10 +1496,12 @@ function handleAction(action, el) {
     case 'import': $('#importFile').click(); break;
     case 'add-asset': (STATE.assets = STATE.assets || []).push({ id: uid(), name: '', type: 'taxable', balance: 0 }); rebuildAssets(); recompute(); break;
     case 'del-asset': STATE.assets.splice(idx, 1); rebuildAssets(); recompute(); break;
-    case 'add-liab': (STATE.liabilities = STATE.liabilities || []).push({ id: uid(), name: '', type: 'mortgage', balance: 0 }); rebuildLiabs(); recompute(); break;
+    case 'add-liab': (STATE.liabilities = STATE.liabilities || []).push({ id: uid(), name: '', type: 'auto', balance: 0, rate: 6, payment: 0 }); rebuildLiabs(); recompute(); break;
     case 'del-liab': STATE.liabilities.splice(idx, 1); rebuildLiabs(); recompute(); break;
     case 'add-goal': (STATE.goals = STATE.goals || []).push({ id: uid(), name: 'New Goal', type: 'purchase', priority: 'Medium', amount: 50000, years: 5, funded: 0, monthly: 0 }); rebuildGoals(); recompute(); break;
     case 'del-goal': STATE.goals.splice(idx, 1); rebuildGoals(); recompute(); break;
+    case 'add-event': (STATE.events = STATE.events || []).push({ id: uid(), type: el.dataset.type || 'expense', label: '', amount: 25000, atAge: (RESULTS.curAge || 50) + 5, startAge: (RESULTS.curAge || 50) + 5, years: 3 }); rebuildEvents(); recompute(); break;
+    case 'del-event': STATE.events.splice(idx, 1); rebuildEvents(); recompute(); break;
     case 'goto': showView(el.dataset.view); break;
     case 'open-report': openReport(); break;
     case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0 }; built.decision = false; showView('decision'); break;
@@ -1113,6 +1523,7 @@ function onInput(e) {
     if (STATE[arr] && STATE[arr][i]) STATE[arr][i][key] = parseV(t.value, t.getAttribute('data-vtype') || 'text');
     recompute();
     if (arr === 'goals' && key === 'type') rebuildGoals();
+    if (arr === 'events' && key === 'type') rebuildEvents();
     return;
   }
   if (t.matches('[data-scn]')) {

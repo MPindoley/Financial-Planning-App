@@ -139,8 +139,19 @@ body.privacy .amount::selection{background:transparent}
 .cols-2{grid-template-columns:repeat(2,1fr)}
 .cols-3{grid-template-columns:repeat(3,1fr)}
 .cols-4{grid-template-columns:repeat(4,1fr)}
-.split{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:1.2rem;align-items:start}
+.split{display:grid;grid-template-columns:minmax(340px,460px) 1fr;gap:1.2rem;align-items:start}
 @media(max-width:1024px){.split{grid-template-columns:1fr}.cols-4{grid-template-columns:repeat(2,1fr)}.cols-3{grid-template-columns:repeat(2,1fr)}}
+
+/* Input-heavy layouts: two-column form packing + sticky result rails */
+.profile-layout{display:grid;grid-template-columns:1fr 360px;gap:1.3rem;align-items:start}
+.input-cols{columns:2;column-gap:1.1rem}
+.input-cols>.panel{break-inside:avoid;width:100%;margin-bottom:1.1rem;display:inline-block}
+.rail{position:sticky;top:calc(var(--topbar-h) + var(--nav-h) + 14px)}
+.io-inputs{position:sticky;top:calc(var(--topbar-h) + var(--nav-h) + 14px);align-self:start}
+.io-inputs>.panel{margin-bottom:1.1rem}
+@media(max-width:1180px){.profile-layout{grid-template-columns:1fr}.rail{position:static}}
+@media(max-width:1024px){.io-inputs{position:static}}
+@media(max-width:760px){.input-cols{columns:1}}
 @media(max-width:680px){.cols-2,.cols-3,.cols-4{grid-template-columns:1fr}}
 
 /* ============================ PANELS / CARDS ============================ */
