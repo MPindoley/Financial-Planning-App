@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Matthew Pindoley, SE-AWMA® — Financial Planning</title>
+<meta name="description" content="A fiduciary financial planning workspace — goals-based & cash flow planning, needs analysis, foundational & advanced planning, and automated insights."/>
+<meta name="theme-color" content="#0F1A2B"/>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body data-view="dashboard">
+
+<!-- ─────────────────────────  TOP BAR  ───────────────────────── -->
+<header id="topbar">
+  <div class="brand">
+    <div class="brand-mark" aria-hidden="true">MP</div>
+    <div class="brand-text">
+      <div class="brand-name">Matthew Pindoley, <span>SE-AWMA®</span></div>
+      <div class="brand-sub">Wealth, Engineered for Generations</div>
+    </div>
+  </div>
+
+  <div class="plan-switch">
+    <button id="planMenuBtn" class="plan-current" aria-haspopup="true" aria-expanded="false">
+      <span class="plan-label">Plan</span>
+      <span class="plan-name" id="planNameLabel">New Client</span>
+      <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+    </button>
+    <div id="planMenu" class="plan-menu" role="menu" hidden></div>
+  </div>
+
+  <div class="topbar-actions">
+    <button class="icon-btn" id="privacyBtn" title="Privacy — blur all dollar amounts (P)" aria-pressed="false">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+      <span>Privacy</span>
+    </button>
+    <button class="icon-btn" id="presentBtn" title="Enter client presentation mode (F)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3z"/><path d="M8 20h8M12 16v4"/></svg>
+      <span>Present</span>
+    </button>
+    <button class="icon-btn" id="reportBtn" title="Open report &amp; print center">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
+      <span>Report</span>
+    </button>
+    <button class="icon-btn safe" id="safeBtn" title="Safe screen — instantly cover everything (Esc toggles)">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/></svg>
+      <span>Safe</span>
+    </button>
+  </div>
+</header>
+
+<!-- ─────────────────────────  NAV  ───────────────────────── -->
+<nav id="modnav" aria-label="Planning modules">
+  <button class="navlink active" data-view="dashboard"><span class="nl-ico">◆</span> Dashboard</button>
+  <button class="navlink" data-view="profile"><span class="nl-ico">◷</span> Client Profile</button>
+  <button class="navlink" data-view="needs"><span class="nl-ico">◐</span> Needs Analysis</button>
+  <button class="navlink" data-view="cashflow"><span class="nl-ico">≋</span> Goals &amp; Cash Flow</button>
+  <button class="navlink" data-view="foundational"><span class="nl-ico">▦</span> Foundational</button>
+  <button class="navlink" data-view="tax"><span class="nl-ico">§</span> Tax Planning</button>
+  <button class="navlink" data-view="decision"><span class="nl-ico">⟁</span> Decision Center</button>
+  <button class="navlink" data-view="coplanner"><span class="nl-ico">✦</span> CoPlanner</button>
+  <div class="nav-spacer"></div>
+  <span class="nav-status" id="saveStatus">Saved</span>
+</nav>
+
+<!-- ─────────────────────────  MAIN  ───────────────────────── -->
+<main id="main">
+  <section class="view active" data-view="dashboard"></section>
+  <section class="view" data-view="profile"></section>
+  <section class="view" data-view="needs"></section>
+  <section class="view" data-view="cashflow"></section>
+  <section class="view" data-view="foundational"></section>
+  <section class="view" data-view="tax"></section>
+  <section class="view" data-view="decision"></section>
+  <section class="view" data-view="coplanner"></section>
+</main>
+
+<!-- ─────────────────────────  PRESENTATION CHROME  ───────────────────────── -->
+<div id="presentBar" hidden>
+  <div class="pb-left">
+    <span class="pb-brand">Matthew Pindoley, <em>SE-AWMA®</em></span>
+  </div>
+  <div class="pb-center" id="presentTabs"></div>
+  <div class="pb-right">
+    <button class="pb-btn" id="presentPrivacy" title="Blur amounts">Privacy</button>
+    <button class="pb-btn" id="presentExit" title="Exit presentation (F / Esc)">Exit ✕</button>
+  </div>
+</div>
+
+<!-- Dark gold cover slide used at the start of presentation mode -->
+<div id="coverSlide" hidden>
+  <div class="cover-inner">
+    <div class="cover-eyebrow">A Financial Plan Prepared For</div>
+    <h1 class="cover-client" id="coverClient">Your Family</h1>
+    <div class="cover-rule"></div>
+    <div class="cover-advisor">Matthew Pindoley, <em>SE-AWMA®</em></div>
+    <div class="cover-tag">Wealth, Engineered for Generations</div>
+    <div class="cover-date" id="coverDate"></div>
+    <button class="cover-go" id="coverGo">Begin &rarr;</button>
+  </div>
+</div>
+
+<!-- ─────────────────────────  SAFE SCREEN  ───────────────────────── -->
+<div id="safeScreen" hidden>
+  <div class="safe-inner">
+    <div class="brand-mark big" aria-hidden="true">MP</div>
+    <div class="safe-name">Matthew Pindoley, <span>SE-AWMA®</span></div>
+    <div class="safe-tag">Wealth, Engineered for Generations</div>
+    <button class="safe-resume" id="safeResume">Resume Session</button>
+  </div>
+</div>
+
+<!-- ─────────────────────────  REPORT / PRINT CENTER  ───────────────────────── -->
+<div id="reportModal" hidden>
+  <div class="report-dialog">
+    <header class="rd-head">
+      <h2>Report &amp; Print Center</h2>
+      <button class="icon-btn ghost" id="reportClose">Close ✕</button>
+    </header>
+    <div class="rd-body" id="reportControls"></div>
+    <footer class="rd-foot">
+      <button class="btn ghost" id="reportClose2">Cancel</button>
+      <button class="btn gold" id="reportPrint">Print / Save as PDF</button>
+    </footer>
+  </div>
+</div>
+
+<!-- Hidden container the print report is rendered into -->
+<div id="reportRoot" aria-hidden="true"></div>
+
+<!-- Toast -->
+<div id="toast" hidden></div>
+
+<input id="importFile" type="file" accept="application/json,.json" hidden>
+
+<script src="app.js"></script>
+</body>
+</html>
