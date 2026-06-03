@@ -31,6 +31,18 @@ function fmtK(n) {
 const pct = (n, dp = 1) => `${(Number(n) || 0).toFixed(dp)}%`;
 const money  = n => `<span class="amount">${fmt$(n)}</span>`;
 const moneyK = n => `<span class="amount">${fmtK(n)}</span>`;
+/* Fast money entry: accept "250k", "1.2m", "250,000", "$250000" → number. */
+function parseMoney(v) {
+  if (typeof v === 'number') return v;
+  let s = String(v).trim().toLowerCase().replace(/[$,\s]/g, '');
+  if (!s) return 0;
+  let mult = 1;
+  if (s.endsWith('k')) { mult = 1e3; s = s.slice(0, -1); }
+  else if (s.endsWith('m')) { mult = 1e6; s = s.slice(0, -1); }
+  const n = parseFloat(s);
+  return isNaN(n) ? 0 : Math.round(n * mult);
+}
+const moneyDisplay = n => { const x = Number(n); return isNaN(x) ? '' : x.toLocaleString('en-US'); };
 
 /* ----------------------------- finance math ------------------------------- */
 function fv(pv, r, n)        { return (pv || 0) * pow(1 + r, n); }
@@ -61,7 +73,7 @@ function defaultState() {
     insurance: { lifeClient: 0, lifeSpouse: 0 },
     protection: { replacePct: 70, replaceYears: 15, finalExpenses: 20000, includeDebt: true, includeEducation: true },
     assumptions: { inflation: 2.7, preReturn: 6.5, postReturn: 4.8, eduInflation: 5, effectiveTaxRate: 22, ssCola: 2.3,
-                   stateTaxRate: 0, dividendYield: 1.8, taxableBasisPct: 60, rmdStartAge: 73 },
+                   stateTaxRate: 0, dividendYield: 1.8, taxableBasisPct: 60, rmdStartAge: 73, volatilityPre: 12, volatilityPost: 9 },
     quickEducation: { childName: '', annualCost: 35000, yearsUntil: 10, duration: 4, funded: 0, monthly: 0 },
     goals: [{ id: uid(), name: 'Retirement', type: 'retirement', priority: 'High' }],
     events: [],
@@ -254,7 +266,7 @@ function sequenceWithdrawals(W, bTax, bDef, bRoth, basis) {
 }
 
 /* ----------------------------- projection simulation ---------------------- */
-function simulate(S) {
+function simulate(S, opts = {}) {
   const A = S.assumptions, H = S.household, I = S.income, E = S.expenses, SV = S.savings;
   const infl = A.inflation / 100, pre = A.preReturn / 100, post = A.postReturn / 100,
         salg = (+I.salaryGrowth || 0) / 100, cola = (+A.ssCola || 0) / 100;
@@ -287,7 +299,8 @@ function simulate(S) {
     const inflFac = pow(1 + infl, Math.max(0, year - TAX.baseYear)), g = pow(1 + infl, t);
     const spNow = spAge0 + t;
     const clientWorking = age < clientRet, spouseWorking = spOn && spNow < spRet, anyWorking = clientWorking || spouseWorking;
-    const retired = age >= clientRet, growRate = retired ? post : pre;
+    const retired = age >= clientRet;
+    const growRate = opts.sampleReturn ? opts.sampleReturn(retired) : (retired ? post : pre);
 
     /* one-time balance/debt events */
     events.forEach(ev => {
@@ -373,6 +386,85 @@ function simulate(S) {
     rows.push(row);
   }
   return { rows, endingBalance: rows.length ? rows[rows.length - 1].end : 0, depletionAge, lifetimeTax, lifetimeFedTax, lifetimeStateTax };
+}
+
+/* ----------------------------- Monte Carlo -------------------------------- */
+function randNormal(mean, sd) {
+  let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random();
+  return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+function monteCarlo(S, trials) {
+  trials = trials || 600;
+  const A = S.assumptions;
+  const pre = A.preReturn / 100, post = A.postReturn / 100;
+  const volPre = (A.volatilityPre != null ? +A.volatilityPre : 12) / 100;
+  const volPost = (A.volatilityPost != null ? +A.volatilityPost : 9) / 100;
+  const sampler = retired => Math.max(-0.6, randNormal(retired ? post : pre, retired ? volPost : volPre));
+  const base = simulate(S);
+  const ages = base.rows.map(r => r.age);
+  const paths = []; let successes = 0;
+  for (let i = 0; i < trials; i++) {
+    const sim = simulate(S, { sampleReturn: sampler });
+    if (sim.depletionAge == null) successes++;
+    paths.push(sim.rows.map(r => r.end));
+  }
+  const n = ages.length;
+  const bandAt = pPct => {
+    const idx = Math.min(trials - 1, Math.floor(trials * pPct));
+    const out = [];
+    for (let y = 0; y < n; y++) {
+      const col = paths.map(p => p[y]).sort((a, b) => a - b);
+      out.push(col[idx]);
+    }
+    return out;
+  };
+  const endings = paths.map(p => p[n - 1]).sort((a, b) => a - b);
+  const q = pPct => endings[Math.floor(trials * pPct)] || 0;
+  return { trials, success: successes / trials, ages,
+    p10: bandAt(0.10), p50: bandAt(0.50), p90: bandAt(0.90),
+    endP10: q(0.10), endP50: q(0.50), endP90: q(0.90) };
+}
+function mcSignature(S) {
+  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.rothStrategy]);
+}
+const MC_MULTI = new Map();
+function mcFor(S, trials) {
+  const sig = mcSignature(S), hit = MC_MULTI.get(sig);
+  if (hit) return hit;
+  const r = monteCarlo(S, trials || 600);
+  MC_MULTI.set(sig, r);
+  if (MC_MULTI.size > 8) MC_MULTI.delete(MC_MULTI.keys().next().value);
+  return r;
+}
+const getMonteCarlo = () => mcFor(STATE, 600);
+/* Return cached MC immediately, or null and compute off-thread then call onReady to re-render. */
+function mcAsync(onReady) {
+  const sig = mcSignature(STATE), hit = MC_MULTI.get(sig);
+  if (hit) return hit;
+  setTimeout(() => { mcFor(STATE, 600); if (onReady) onReady(); }, 0);
+  return null;
+}
+
+/* ----------------------------- Social Security optimizer ------------------ */
+/* Benefit factors relative to PIA (Full Retirement Age = 67) for claim ages. */
+function ssFactor(claimAge, fra) {
+  fra = fra || 67;
+  if (claimAge >= fra) return 1 + Math.min(70, claimAge - fra) * 0.08;       // +8%/yr delayed credits, capped at 70
+  const monthsEarly = (fra - claimAge) * 12;
+  const first = Math.min(36, monthsEarly), beyond = Math.max(0, monthsEarly - 36);
+  return Math.max(0.5, 1 - (first * 5 / 9 + beyond * 5 / 12) / 100);          // 5/9%/mo first 36, 5/12%/mo beyond
+}
+function ssOptimize(pia, currentAge, lifeExp, cola) {
+  cola = cola || 0;
+  const claims = [62, 67, 70];
+  const rows = claims.map(claim => {
+    const annual = pia * ssFactor(claim, 67);
+    let lifetime = 0;
+    for (let age = claim; age <= lifeExp; age++) lifetime += annual * pow(1 + cola, age - claim);
+    return { claim, annual, lifetime };
+  });
+  let best = rows[0]; rows.forEach(r => { if (r.lifetime > best.lifetime) best = r; });
+  return { rows, best };
 }
 
 /* ----------------------------- compute engine ----------------------------- */
@@ -603,6 +695,22 @@ function lineChart(series, opts = {}) {
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">${grid}${mk}${paths}${hi}<line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${ylab}${xlab}</svg>`;
 }
 
+function bandChart(ages, lo, mid, hi, opts = {}) {
+  const W = opts.w || 760, H = opts.h || 250, pad = { l: 56, r: 16, t: 16, b: 28 };
+  const xMin = ages[0], xMax = ages[ages.length - 1];
+  const yMax = (Math.max(...hi, 1) * 1.08) || 1, yMin = 0;
+  const sx = x => pad.l + (x - xMin) / ((xMax - xMin) || 1) * (W - pad.l - pad.r);
+  const sy = y => H - pad.b - (y - yMin) / ((yMax - yMin) || 1) * (H - pad.t - pad.b);
+  let grid = '', ylab = '';
+  for (let i = 0; i <= 4; i++) { const v = yMax * i / 4, yy = sy(v); grid += `<line class="grid-line" x1="${pad.l}" y1="${yy}" x2="${W - pad.r}" y2="${yy}"/>`; ylab += `<text class="lbl amount" x="${pad.l - 8}" y="${yy + 3}" text-anchor="end">${fmtK(v)}</text>`; }
+  let xlab = ''; for (let i = 0; i <= 6; i++) { const xv = xMin + (xMax - xMin) * i / 6; xlab += `<text class="lbl" x="${sx(xv)}" y="${H - 8}" text-anchor="middle">${Math.round(xv)}</text>`; }
+  const top = ages.map((a, i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)} ${sy(hi[i]).toFixed(1)}`).join(' ');
+  const bot = ages.map((a, i) => `${sx(a).toFixed(1)} ${sy(lo[i]).toFixed(1)}`).reverse().map((p, i) => `${i ? 'L' : 'L'}${p}`).join(' ');
+  const area = `<path d="${top} ${bot} Z" fill="var(--gold)" opacity=".18"/>`;
+  const midPath = `<path class="line" d="${ages.map((a, i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)} ${sy(mid[i]).toFixed(1)}`).join(' ')}" stroke="var(--gold-deep)"/>`;
+  let mk = ''; (opts.markers || []).forEach(m => { const mx = sx(m.x); mk += `<line class="marker-line" x1="${mx}" y1="${pad.t}" x2="${mx}" y2="${H - pad.b}"/><text class="lbl-strong" x="${mx}" y="${pad.t + 9}" text-anchor="middle">${escapeHtml(m.label)}</text>`; });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${mk}${area}${midPath}<line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${ylab}${xlab}</svg>`;
+}
 function barChart(items, opts = {}) {
   const W = opts.w || 760, H = opts.h || 250, pad = { l: 56, r: 16, t: 16, b: 40 };
   const max = Math.max(...items.flatMap(it => it.bars ? it.bars.map(b => b.value) : [it.value]), 1) * 1.12;
@@ -708,14 +816,19 @@ function field(f) {
     return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label><textarea data-path="${f.path}" data-vtype="text" rows="${f.rows || 4}" placeholder="${escapeAttr(f.ph || '')}">${escapeHtml(v ?? '')}</textarea></div>`;
   }
   const isCur = f.type === 'currency', isPct = f.type === 'percent', isText = f.type === 'text';
-  const vtype = isText ? 'text' : (f.type || 'number');
   const pre = isCur ? '<span class="prefix">$</span>' : '';
   const suf = isPct ? '<span class="suffix">%</span>' : (f.suffix ? `<span class="suffix">${escapeHtml(f.suffix)}</span>` : '');
   const cls = `control ${isCur ? 'has-prefix' : ''} ${(isPct || f.suffix) ? 'has-suffix' : ''}`.trim();
-  const step = isPct ? (f.step || 0.1) : (isCur ? (f.step || 1000) : (f.step || 1));
-  const attrs = isText ? '' : `step="${step}" min="${f.min != null ? f.min : 0}" ${f.max != null ? `max="${f.max}"` : ''}`;
-  return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label>
-    <div class="${cls}">${pre}<input type="${isText ? 'text' : 'number'}" data-path="${f.path}" data-vtype="${vtype}" value="${escapeAttr(v ?? '')}" ${attrs} placeholder="${escapeAttr(f.ph || '')}">${suf}</div></div>`;
+  let input;
+  if (isCur) {
+    input = `<input type="text" inputmode="decimal" data-path="${f.path}" data-money value="${escapeAttr(moneyDisplay(v))}" placeholder="${escapeAttr(f.ph || '0')}">`;
+  } else {
+    const vtype = isText ? 'text' : (f.type || 'number');
+    const step = isPct ? (f.step || 0.1) : (f.step || 1);
+    const attrs = isText ? '' : `step="${step}" min="${f.min != null ? f.min : 0}" ${f.max != null ? `max="${f.max}"` : ''}`;
+    input = `<input type="${isText ? 'text' : 'number'}" data-path="${f.path}" data-vtype="${vtype}" value="${escapeAttr(v ?? '')}" ${attrs} placeholder="${escapeAttr(f.ph || '')}">`;
+  }
+  return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label><div class="${cls}">${pre}${input}${suf}</div></div>`;
 }
 const fieldRow = (...f) => `<div class="field-row${f.length === 3 ? ' three' : ''}">${f.map(field).join('')}</div>`;
 function toggleField(path, label, rebuild) {
@@ -733,7 +846,7 @@ function assetRow(a, i) {
   return `<div class="repeat-row" style="grid-template-columns:1fr 150px 120px 26px">
     <input type="text" data-arr="assets" data-idx="${i}" data-key="name" value="${escapeAttr(a.name)}" placeholder="Account name">
     <select data-arr="assets" data-idx="${i}" data-key="type">${typeOpts(ASSET_TYPES, a.type)}</select>
-    <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="assets" data-idx="${i}" data-key="balance" data-vtype="currency" value="${a.balance}"></div>
+    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(a.balance)}"></div>
     <button class="rr-del" data-action="del-asset" data-idx="${i}" title="Remove">×</button></div>`;
 }
 function liabRow(l, i) {
@@ -742,9 +855,9 @@ function liabRow(l, i) {
     <select data-arr="liabilities" data-idx="${i}" data-key="type">${typeOpts(LIAB_TYPES, l.type)}</select>
     <button class="rr-del" data-action="del-liab" data-idx="${i}" title="Remove">×</button>
     <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem">
-      <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="liabilities" data-idx="${i}" data-key="balance" data-vtype="currency" value="${l.balance}" title="Balance"></div>
+      <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(l.balance)}" title="Balance"></div>
       <div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="liabilities" data-idx="${i}" data-key="rate" data-vtype="percent" value="${l.rate || 0}" title="Interest rate"><span class="suffix">%</span></div>
-      <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="50" min="0" data-arr="liabilities" data-idx="${i}" data-key="payment" data-vtype="currency" value="${l.payment || 0}" title="Monthly payment"></div>
+      <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="payment" data-money value="${moneyDisplay(l.payment || 0)}" title="Monthly payment"></div>
     </div></div>`;
 }
 function goalRow(g, i) {
@@ -756,11 +869,11 @@ function goalRow(g, i) {
       <button class="rr-del" data-action="del-goal" data-idx="${i}" title="Remove">×</button>
     ${isMgmt ? `<div style="grid-column:1/-1;font-size:.72rem;color:var(--faint);margin-top:.1rem">Calculated from the Retirement & Protection inputs.</div>` :
       `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-top:.3rem">
-        <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="goals" data-idx="${i}" data-key="amount" data-vtype="currency" value="${g.amount || 0}" title="${g.type === 'education' ? 'Annual cost (today)' : 'Goal amount (today)'}"></div>
+        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="${g.type === 'education' ? 'Annual cost (today)' : 'Goal amount (today)'}"></div>
         <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="years" value="${g.years || 0}" title="Years until" placeholder="Yrs">
         ${g.type === 'education' ? `<input type="number" min="1" data-arr="goals" data-idx="${i}" data-key="duration" value="${g.duration || 4}" title="Years of school" placeholder="Dur">` :
-          `<div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="goals" data-idx="${i}" data-key="funded" data-vtype="currency" value="${g.funded || 0}" title="Already saved"></div>`}
-        <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="50" min="0" data-arr="goals" data-idx="${i}" data-key="monthly" data-vtype="currency" value="${g.monthly || 0}" title="Monthly savings"></div>
+          `<div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="funded" data-money value="${moneyDisplay(g.funded || 0)}" title="Already saved"></div>`}
+        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="monthly" data-money value="${moneyDisplay(g.monthly || 0)}" title="Monthly savings"></div>
       </div>`}</div>`;
 }
 
@@ -773,10 +886,10 @@ function eventRow(ev, i) {
   if (recurring) fields = `
     <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="startAge" value="${ev.startAge || 0}" title="Begins at client age" placeholder="Age">
     <input type="number" min="1" data-arr="events" data-idx="${i}" data-key="years" value="${ev.years || 1}" title="For how many years" placeholder="Yrs">
-    <div class="control has-prefix"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="currency" value="${ev.amount || 0}" title="Amount per year (today's $)"></div>`;
+    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Amount per year (today's $)"></div>`;
   else if (oneTime) fields = `
     <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
-    <div class="control has-prefix" style="grid-column:span 2"><span class="prefix">$</span><input type="number" step="1000" min="0" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="currency" value="${ev.amount || 0}" title="Amount (today's $)"></div>`;
+    <div class="control has-prefix" style="grid-column:span 2"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Amount (today's $)"></div>`;
   else if (isDown) fields = `
     <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
     <div class="control has-suffix" style="grid-column:span 2"><input type="number" min="0" max="90" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="percent" value="${ev.amount || 0}" title="One-year portfolio decline"><span class="suffix">% drop</span></div>`;
@@ -913,12 +1026,13 @@ function getMilestones(R) {
 }
 function renderDashboard() {
   const R = RESULTS, ins = buildInsights(R).slice(0, 3);
+  const mc = mcAsync(() => { if (currentView === 'dashboard') (presentMode ? showPresentView('dashboard') : renderDashboard()); });
+  const successPct = mc ? Math.round(mc.success * 100) : null;
   if (dashAge == null || dashAge < R.curAge || dashAge > R.endAge) dashAge = clamp(R.retAge, R.curAge, R.endAge);
   const who = clientNames();
-  const healthBad = R.depletionAge != null && R.depletionAge < R.life;
-  const t3 = healthBad ? 'bad' : (R.depletionAge != null ? 'warn' : 'good');
-  const healthText = healthBad ? `Attention — assets run low at age ${R.depletionAge}`
-    : (R.depletionAge != null ? `Funded, but review plan longevity` : `On track — funded through age ${R.life}`);
+  const t3 = successPct == null ? 'gold' : successPct >= 80 ? 'good' : successPct >= 60 ? 'warn' : 'bad';
+  const healthText = successPct == null ? 'Running market simulations…'
+    : (successPct >= 80 ? 'On track' : successPct >= 60 ? 'Likely on track' : 'Needs attention') + ` — ${successPct}% probability of success`;
   getViewEl('dashboard').innerHTML = `
     <div class="dash-hero">
       <div>
@@ -934,18 +1048,46 @@ function renderDashboard() {
     </div>
     <div class="grid cols-4" style="margin-bottom:1.3rem">
       ${statCard('Net Worth', fmt$(R.netWorth), { tone: R.netWorth >= 0 ? 'good' : 'bad', note: `${money(R.totalAssets)} assets · ${money(R.totalLiab)} debt` })}
+      ${statCard('Probability of Success', successPct == null ? '…' : successPct + '%', { raw: true, tone: t3 === 'gold' ? '' : t3, valClass: 'val-' + t3, note: successPct == null ? 'running simulations…' : `${mc.trials} market simulations` })}
       ${statCard('Retirement Funded', pct(R.fundedRatio * 100, 0), { raw: true, tone: tone(R.fundedRatio), valClass: 'val-' + tone(R.fundedRatio), note: R.surplus >= 0 ? `Surplus ${money(R.surplus)}` : `Gap ${money(-R.surplus)}` })}
-      ${statCard('Plan Lasts To', R.depletionAge != null ? 'Age ' + R.depletionAge : 'Age ' + R.life + '+', { raw: true, tone: t3, valClass: 'val-' + t3, note: R.depletionAge != null ? 'projected depletion' : `${money(R.endingBalance)} ending` })}
       ${statCard('Lifetime Taxes', fmtK(R.lifetimeTax), { tone: 'warn', note: `${money(R.lifetimeFedTax)} federal` })}
     </div>
     ${dashTimeline(R)}
     <div style="height:1.3rem"></div>
+    ${comparePanel()}
     <div class="split" style="grid-template-columns:1fr 1fr">
       ${panel('Goal Funding', goalProgressList(R), { hideKey: 'dash-goals', headExtra: `<button class="btn sm advisor-only" data-action="goto" data-view="cashflow">Manage</button>` })}
       ${panel('Top Insights', ins.map(insightHTML).join('') || '<div class="empty">Enter client data to generate insights.</div>',
         { sub: 'CoPlanner', headExtra: `<button class="btn sm advisor-only" data-action="goto" data-view="coplanner">View all</button>` })}
     </div>`;
   updateDashScrub();
+}
+function comparePanel() {
+  if (!STATE.baseline) {
+    return `<div class="advisor-only"><div class="panel pad" style="display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-bottom:1.3rem">
+      <div><b style="font-size:1.05rem">Before / After compare</b><div class="view-sub" style="margin:.2rem 0 0;max-width:none">Save the current plan as a baseline, then apply a recommendation — the impact appears here, live, for the client.</div></div>
+      <button class="btn gold" data-action="save-baseline">Save current as baseline</button></div></div>`;
+  }
+  const base = compute(STATE.baseline), R = RESULTS;
+  const sBase = Math.round(mcFor(STATE.baseline, 400).success * 100), sNow = Math.round(mcFor(STATE, 600).success * 100);
+  const lastsB = base.depletionAge != null ? base.depletionAge : base.life + 1, lastsN = R.depletionAge != null ? R.depletionAge : R.life + 1;
+  const ageFmt = v => v > R.life ? `${R.life}+` : `age ${Math.round(v)}`;
+  return panel('Before / After — vs Saved Baseline',
+    lineChart([
+      { name: 'Baseline', color: 'var(--ink)', points: base.rows.map(r => ({ x: r.age, y: r.end })) },
+      { name: 'Current', color: 'var(--gold)', fill: 'var(--gold)', points: R.rows.map(r => ({ x: r.age, y: r.end })) }
+    ], { markers: [{ x: R.retAge, label: 'Retire' }], h: 220 }) +
+    `<div class="legend"><span><i class="dot" style="background:var(--ink)"></i>Baseline</span><span><i class="dot" style="background:var(--gold)"></i>Current plan</span></div>
+    <table class="tbl" style="margin-top:1rem"><thead><tr><th style="text-align:left">Metric</th><th>Baseline</th><th>Current</th><th>Change</th></tr></thead><tbody>
+      ${cmpRow('Probability of success', sBase, sNow, v => v + '%')}
+      ${cmpRow('Net worth', base.netWorth, R.netWorth, fmt$)}
+      ${cmpRow('Retirement funded', base.fundedRatio, R.fundedRatio, v => pct(v * 100, 0))}
+      ${cmpRow('Ending balance · age ' + R.life, base.endingBalance, R.endingBalance, fmt$)}
+      ${cmpRow('Lifetime taxes', base.lifetimeTax, R.lifetimeTax, fmt$, false)}
+      ${cmpRow('Portfolio lasts to', lastsB, lastsN, ageFmt)}
+    </tbody></table>`,
+    { sub: 'Recommendation impact', hideKey: 'dash-compare', headExtra: `<span class="btn-row"><button class="btn sm advisor-only" data-action="save-baseline">Update</button><button class="btn ghost sm advisor-only" data-action="clear-baseline">Clear</button></span>` })
+    + `<div style="height:1.3rem"></div>`;
 }
 function dashTimeline(R) {
   return `<div class="timeline">
@@ -1050,10 +1192,40 @@ function buildProfile() {
     'Capture the household’s full financial picture. Everything here powers the plan, charts, and client reports.') +
     `<div class="profile-layout"><div class="input-cols">${left}</div><aside class="rail"><div id="res-profile"></div></aside></div>`;
 }
+function factFinder(S) {
+  const out = [], add = (status, label, hint) => out.push({ status, label, hint });
+  const c = S.household.client, sp = S.household.spouse, I = S.income, E = S.expenses, SV = S.savings, INS = S.insurance;
+  add(c.name ? 'ok' : 'todo', 'Client name', c.name ? '' : 'Full name');
+  add((+I.clientSalary > 0 || +I.otherIncome > 0) ? 'ok' : 'todo', 'Income', I.clientSalary > 0 ? '' : 'Annual salary / income');
+  add(+E.annualExpenses > 0 ? 'ok' : 'todo', 'Living expenses', E.annualExpenses > 0 ? '' : 'Annual spending');
+  add((+SV.annualSavings > 0 || +SV.employerMatch > 0) ? 'ok' : 'todo', 'Savings rate', SV.annualSavings > 0 ? '' : 'Saved per year');
+  add((S.assets && S.assets.length) ? 'ok' : 'todo', 'Accounts & assets', (S.assets && S.assets.length) ? `${S.assets.length} entered` : 'Add accounts');
+  add(+I.ssClient > 0 ? 'ok' : 'todo', 'Social Security', I.ssClient > 0 ? '' : 'Est. benefit (ssa.gov)');
+  add(+INS.lifeClient > 0 ? 'ok' : 'todo', 'Life insurance', INS.lifeClient > 0 ? '' : 'Existing coverage');
+  if (sp.included) {
+    add(sp.name ? 'ok' : 'todo', 'Spouse details', sp.name ? '' : 'Name & age');
+    add(+I.spouseSalary > 0 ? 'ok' : 'todo', 'Spouse income', '');
+  }
+  const debtsMissing = (S.liabilities || []).filter(l => (+l.balance > 0) && (!(+l.rate > 0) || !(+l.payment > 0)));
+  if (debtsMissing.length) add('warn', 'Debt details', `${debtsMissing.length} missing rate/payment`);
+  if (+c.retireAge <= +c.age && +c.age > 0) add('warn', 'Retirement age', 'At/below current age');
+  const gross = (+I.clientSalary || 0) + (+I.spouseSalary || 0) + (+I.otherIncome || 0);
+  if (gross > 0 && ((+SV.annualSavings || 0) + (+SV.employerMatch || 0)) > gross) add('warn', 'Savings vs income', 'Savings exceed income');
+  return out;
+}
+function factFinderPanel() {
+  const items = factFinder(STATE);
+  const todo = items.filter(i => i.status !== 'ok').length;
+  const rows = items.map(i => {
+    const ico = i.status === 'ok' ? '✓' : i.status === 'warn' ? '!' : '○';
+    return `<div class="ff-row ${i.status}"><span class="ff-ico">${ico}</span><span class="ff-label">${escapeHtml(i.label)}</span>${i.hint ? `<span class="ff-hint">${escapeHtml(i.hint)}</span>` : ''}</div>`;
+  }).join('');
+  return panel('Fact Finder', rows, { sub: todo ? `${todo} to collect` : 'Complete ✓', cls: 'advisor-only' });
+}
 function liveProfile() {
   const R = RESULTS;
   const el = $('#res-profile'); if (!el) return;
-  el.innerHTML = panel('Snapshot', `
+  el.innerHTML = factFinderPanel() + `<div style="height:1rem"></div>` + panel('Snapshot', `
     <div class="grid cols-2" style="margin-bottom:1rem">
       ${statCard('Net Worth', fmt$(R.netWorth), { tone: R.netWorth >= 0 ? 'good' : 'bad', small: true })}
       ${statCard('Investable', fmt$(R.investable), { small: true })}</div>
@@ -1165,6 +1337,26 @@ function liveCashflow() {
 }
 
 /* ----------------------------- FOUNDATIONAL ------------------------------- */
+function mcPanel() {
+  const R = RESULTS;
+  const mc = mcAsync(() => { if (currentView === 'foundational') (presentMode ? showPresentView('foundational') : renderFoundational()); });
+  if (!mc) return panel('Monte Carlo — Probability of Success', '<div class="empty"><div class="e-ico">◷</div>Running 600 randomized market simulations…</div>', { sub: 'Confidence', hideKey: 'found-mc' });
+  const pctV = Math.round(mc.success * 100);
+  const t3 = pctV >= 80 ? 'good' : pctV >= 60 ? 'warn' : 'bad';
+  const band = pctV >= 80 ? 'Highly confident' : pctV >= 60 ? 'On track' : pctV >= 40 ? 'Needs attention' : 'At risk';
+  return panel('Monte Carlo — Probability of Success', `
+    <div class="split" style="grid-template-columns:270px 1fr;align-items:center;gap:1.4rem">
+      <div style="text-align:center">${gauge(pctV)}
+        <div style="margin-top:.2rem">${badge(band, t3)}</div>
+        <p class="i-action" style="margin-top:.6rem">Across <b>${mc.trials}</b> randomized market simulations, the plan funds the full lifestyle through age ${R.life} in <b>${pctV}%</b> of outcomes.</p></div>
+      <div>${bandChart(mc.ages, mc.p10, mc.p50, mc.p90, { markers: [{ x: R.retAge, label: 'Retire' }], h: 226 })}
+        <div class="legend"><span><i class="dot" style="background:var(--gold)"></i>Range of outcomes (10th–90th percentile)</span><span><i class="dot" style="background:var(--gold-deep)"></i>Median path</span></div>
+        <div class="grid cols-3" style="gap:.7rem;margin-top:.85rem">
+          ${statCard('Downside · 10th', fmtK(mc.endP10), { small: true, tone: mc.endP10 > 0 ? 'warn' : 'bad' })}
+          ${statCard('Median · 50th', fmtK(mc.endP50), { small: true, tone: 'good' })}
+          ${statCard('Upside · 90th', fmtK(mc.endP90), { small: true })}</div></div>
+    </div>`, { hideKey: 'found-mc', sub: 'Confidence' });
+}
 function renderFoundational() {
   const R = RESULTS;
   const sources = [
@@ -1179,6 +1371,8 @@ function renderFoundational() {
       ${statCard('Retirement Funded', pct(R.fundedRatio * 100, 0), { raw: true, tone: tone(R.fundedRatio), valClass: 'val-' + tone(R.fundedRatio) })}
       ${statCard('Years to Retirement', R.yearsToRet + ' yrs', { raw: true })}
     </div>
+    ${mcPanel()}
+    <div style="height:1.1rem"></div>
     <div class="split" style="grid-template-columns:1fr 1fr;align-items:start">
       ${panel('Net Worth & Allocation', (R.alloc.length ? donut(R.alloc) : '') + '<div style="height:.8rem"></div>' + netWorthTable(R), { hideKey: 'found-nw' })}
       ${panel('Retirement Outlook',
@@ -1271,7 +1465,30 @@ function liveDecision() {
         ${cmpRow('Portfolio lasts to', lastsB, lastsA, ageFmt)}
         ${cmpRow('Ending balance (age ' + base.life + ')', base.endingBalance, alt.endingBalance, fmt$)}
         ${cmpRow('Annual savings', base.annualSavings, alt.annualSavings, fmt$)}
-      </tbody></table>`, { sub: 'Live what-if' });
+      </tbody></table>`, { sub: 'Live what-if' })
+    + `<div style="height:1.1rem"></div>` + ssOptimizerPanel();
+}
+function ssOptimizerBlock(name, key, pia, curAge, life, claimNow, cola) {
+  if (!(pia > 0)) return '';
+  const o = ssOptimize(pia, curAge, life, cola);
+  const rows = o.rows.map(r => {
+    const best = r.claim === o.best.claim;
+    return `<tr class="${best ? 'ss-best' : ''}"><td style="text-align:left">${r.claim === 67 ? '67 · FRA' : 'Age ' + r.claim}${best ? '  ' + badge('Best', 'good') : ''}</td><td class="amount">${fmt$(r.annual)}</td><td class="amount">${fmtK(r.lifetime)}</td></tr>`;
+  }).join('');
+  return `<div style="margin-bottom:1.1rem">
+    <div class="progress-label" style="margin-bottom:.45rem"><b>${escapeHtml(name)}</b><span>Plan currently claims at ${claimNow}</span></div>
+    <table class="tbl"><thead><tr><th style="text-align:left">Claim age</th><th>Annual benefit</th><th>Lifetime total</th></tr></thead><tbody>${rows}</tbody></table>
+    <p class="i-action" style="margin-top:.45rem">Claiming at <b>age ${o.best.claim}</b> maximizes lifetime benefits through age ${life} (${fmt$(o.best.lifetime)}).
+      ${claimNow != o.best.claim ? `<button class="btn sm advisor-only" data-action="apply-ss" data-key="${key}" data-age="${o.best.claim}">Apply age ${o.best.claim}</button>` : ''}</p></div>`;
+}
+function ssOptimizerPanel() {
+  const I = STATE.income, c = STATE.household.client, sp = STATE.household.spouse, R = RESULTS, cola = STATE.assumptions.ssCola / 100;
+  const spAgeNow = +sp.age || R.curAge;
+  const body = ssOptimizerBlock(c.name || 'Client', 'ssClaimClient', +I.ssClient || 0, R.curAge, R.life, +I.ssClaimClient || 67, cola)
+    + (R.spOn ? ssOptimizerBlock(sp.name || 'Spouse', 'ssClaimSpouse', +I.ssSpouse || 0, spAgeNow, +sp.lifeExpectancy || R.life, +I.ssClaimSpouse || 67, cola) : '');
+  return panel('Social Security Timing', (body || '<div class="empty">Enter a Social Security benefit on the Client Profile to compare claiming ages.</div>') +
+    `<p class="rp-disclaimer" style="margin-top:.4rem">Benefits estimated from the entered full-retirement-age (67) amount: roughly 70% at 62 and 124% at 70, grown by ${pct(STATE.assumptions.ssCola, 1)} COLA. Lifetime totals assume benefits through life expectancy; the optimal age depends on longevity, taxes, and spousal strategy — confirm with the client.</p>`,
+    { sub: 'Claiming strategy', hideKey: 'dec-ss' });
 }
 
 /* ----------------------------- COPLANNER ---------------------------------- */
@@ -1514,11 +1731,12 @@ function buildReport(opts) {
     <div class="rp-section-title">Asset Allocation</div><div class="rp-chart">${R.alloc.length ? donut(R.alloc, { size: 180 }) : '<p class="rp-note">No investable assets entered.</p>'}</div>${rpFoot}</div>`);
   if (opts.retirement) {
     const sources = [{ label: 'Social Security / Pension', value: R.guaranteedAtRet, color: 'var(--ink)' }, { label: 'Portfolio withdrawals', value: Math.max(0, R.needAtRet - R.guaranteedAtRet), color: 'var(--gold)' }];
+    const mc = getMonteCarlo(), sPct = Math.round(mc.success * 100);
     pages.push(`<div class="report-page">${rpHead('Retirement Outlook')}
-      <div class="rp-grid">${rpStat('Capital Needed', fmt$(R.capitalNeeded))}${rpStat('Projected at Retirement', fmt$(R.projAtRet))}${rpStat('Funded Ratio', pct(R.fundedRatio * 100, 0))}${rpStat(R.surplus >= 0 ? 'Surplus' : 'Shortfall', fmt$(Math.abs(R.surplus)))}</div>
-      <div class="rp-chart">${lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire ' + R.retAge }], w: 760, h: 240 })}</div>
-      <p class="rp-note">${R.depletionAge != null ? `Under current assumptions, the portfolio is projected to be depleted at age <b>${R.depletionAge}</b>.` : `The portfolio is projected to sustain the retirement lifestyle through age ${R.life}, with an estimated ending balance of <b>${fmt$(R.endingBalance)}</b>.`}</p>
-      <div class="rp-section-title">Projected First-Year Retirement Income</div><div class="rp-chart">${donut(sources, { size: 170 })}</div>${rpFoot}</div>`);
+      <div class="rp-grid">${rpStat('Probability of Success', sPct + '%', `${mc.trials} simulations`)}${rpStat('Capital Needed', fmt$(R.capitalNeeded))}${rpStat('Projected at Retirement', fmt$(R.projAtRet))}${rpStat(R.surplus >= 0 ? 'Surplus' : 'Shortfall', fmt$(Math.abs(R.surplus)))}</div>
+      <div class="rp-chart">${bandChart(mc.ages, mc.p10, mc.p50, mc.p90, { markers: [{ x: R.retAge, label: 'Retire ' + R.retAge }], w: 760, h: 210 })}</div>
+      <p class="rp-note">Across ${mc.trials} randomized market simulations, the plan funds the full lifestyle through age ${R.life} in <b>${sPct}%</b> of outcomes. The shaded band shows the 10th–90th percentile range of portfolio values; the line is the median. ${R.depletionAge != null ? `On the deterministic (average-return) path, assets deplete at age <b>${R.depletionAge}</b>.` : `On the deterministic path, the estimated ending balance is <b>${fmt$(R.endingBalance)}</b>.`}</p>
+      <div class="rp-section-title">Projected First-Year Retirement Income</div><div class="rp-chart">${donut(sources, { size: 160 })}</div>${rpFoot}</div>`);
   }
   if (opts.cashflow) {
     const rows = R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge);
@@ -1553,7 +1771,7 @@ function buildReport(opts) {
   if (opts.advisor && (STATE.advisorNotes || '').trim()) pages.push(`<div class="report-page">${rpHead('Advisor Notes — Confidential')}
     <p class="rp-note" style="white-space:pre-wrap;font-size:10pt">${escapeHtml(STATE.advisorNotes)}</p>${rpFoot}</div>`);
   if (opts.disclosures) pages.push(`<div class="report-page">${rpHead('Important Disclosures')}
-    <p class="rp-disclaimer">This analysis is a hypothetical illustration based solely on the data and assumptions provided, prepared for discussion purposes. It is not a guarantee or projection of actual results. Investment returns, inflation, tax rates, life expectancy, and Social Security benefits are estimates that will vary, and actual results may differ materially. The figures herein do not reflect specific products, fees, or the impact of taxes except where noted as a simplified estimate. This material does not constitute investment, tax, or legal advice. Please consult your advisor and qualified tax/legal professionals before acting. Assumptions used: inflation ${pct(STATE.assumptions.inflation, 1)}, pre-retirement return ${pct(STATE.assumptions.preReturn, 1)}, retirement return ${pct(STATE.assumptions.postReturn, 1)}, effective tax rate ${pct(STATE.assumptions.effectiveTaxRate, 1)}.</p>${rpFoot}</div>`);
+    <p class="rp-disclaimer">This analysis is a hypothetical illustration based solely on the data and assumptions provided, prepared for discussion purposes. It is not a guarantee or projection of actual results. Investment returns, inflation, tax rates, life expectancy, and Social Security benefits are estimates that will vary, and actual results may differ materially. Taxes are estimated using ${new Date().getFullYear()} federal brackets (inflated forward), standard deductions, long-term capital-gains rates, Social Security taxation rules, and a flat state rate; they exclude credits, AMT, NIIT, IRMAA, and itemized deductions. This material does not constitute investment, tax, or legal advice. Please consult your advisor and qualified tax/legal professionals before acting. Assumptions used: inflation ${pct(STATE.assumptions.inflation, 1)}, pre-retirement return ${pct(STATE.assumptions.preReturn, 1)}, retirement return ${pct(STATE.assumptions.postReturn, 1)}, state income tax ${pct(STATE.assumptions.stateTaxRate, 1)}.</p>${rpFoot}</div>`);
   $('#reportRoot').innerHTML = pages.join('');
 }
 function doPrint() {
@@ -1595,21 +1813,28 @@ function handleAction(action, el) {
     case 'open-report': openReport(); break;
     case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0 }; built.decision = false; showView('decision'); break;
     case 'hidesec': STATE.presentation.hidden[el.dataset.key] = el.checked; scheduleSave(); recompute(); break;
+    case 'save-baseline': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); recompute(); toast('Baseline saved — make a change to see the impact'); break; }
+    case 'clear-baseline': delete STATE.baseline; scheduleSave(); recompute(); toast('Baseline cleared'); break;
+    case 'apply-ss': setPath(STATE, 'income.' + el.dataset.key, +el.dataset.age); recompute(); toast(`Applied claim age ${el.dataset.age}`); break;
   }
 }
 
 /* ----------------------------- event wiring ------------------------------- */
 function onInput(e) {
-  const t = e.target, parseV = (v, vt) => (['number', 'currency', 'percent', 'age'].includes(vt) ? (v === '' ? 0 : (isNaN(parseFloat(v)) ? 0 : parseFloat(v))) : v);
+  const t = e.target;
+  const readVal = el => el.hasAttribute('data-money')
+    ? parseMoney(el.value)
+    : (['number', 'currency', 'percent', 'age'].includes(el.getAttribute('data-vtype') || 'text')
+        ? (el.value === '' ? 0 : (isNaN(parseFloat(el.value)) ? 0 : parseFloat(el.value))) : el.value);
   if (t.matches('[data-path]')) {
     const p = t.getAttribute('data-path');
-    setPath(STATE, p, parseV(t.value, t.getAttribute('data-vtype') || 'text'));
+    setPath(STATE, p, readVal(t));
     if (p === 'household.client.name') { updateHeader(); renderPlanMenu(); }
     recompute(); return;
   }
   if (t.matches('[data-arr]')) {
     const arr = t.getAttribute('data-arr'), i = +t.getAttribute('data-idx'), key = t.getAttribute('data-key');
-    if (STATE[arr] && STATE[arr][i]) STATE[arr][i][key] = parseV(t.value, t.getAttribute('data-vtype') || 'text');
+    if (STATE[arr] && STATE[arr][i]) STATE[arr][i][key] = readVal(t);
     recompute();
     if (arr === 'goals' && key === 'type') rebuildGoals();
     if (arr === 'events' && key === 'type') rebuildEvents();
@@ -1651,6 +1876,7 @@ function onKey(e) {
 function wireEvents() {
   document.addEventListener('input', onInput);
   document.addEventListener('change', e => { if (e.target.matches('select')) onInput(e); });
+  document.addEventListener('focusout', e => { const t = e.target; if (t && t.hasAttribute && t.hasAttribute('data-money')) t.value = moneyDisplay(parseMoney(t.value)); });
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey);
   $('#planMenuBtn').addEventListener('click', () => $('#planMenu').hidden ? openPlanMenu() : closePlanMenu());

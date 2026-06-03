@@ -15,13 +15,13 @@ Eight modules, mapped to the way you actually run a planning conversation:
 
 | Module | Purpose |
 | --- | --- |
-| **Dashboard** | A client-friendly command center with an **interactive plan timeline** — drag the year scrubber to walk through every year of the plan and watch the portfolio, income mix, taxes, and life-stage milestones update live (a natural talking point in the meeting). Plus headline KPIs, goal funding, and top insights. |
-| **Client Profile** | Capture the household's full picture — people, income, expenses, savings, accounts, debts, insurance, and assumptions. Everything else is driven from here. |
+| **Dashboard** | A client-friendly command center with a **Probability of Success** headline (Monte Carlo), an **interactive plan timeline** — drag the year scrubber to walk through every year and watch the portfolio, income mix, taxes, and life-stage milestones update live — and a **Before / After compare** (save a baseline, apply a recommendation, show the impact instantly). Plus KPIs, goal funding, and top insights. |
+| **Client Profile** | Capture the household's full picture — people, income, expenses, savings, accounts, debts, insurance, and assumptions. A live **Fact Finder** checklist shows what's still missing or needs a follow-up question, so you collect everything in the meeting. Everything else is driven from here. |
 | **Needs Analysis** | Fast, single-goal estimates (retirement, education, protection) to **engage prospects quickly** and create immediate impact. |
 | **Goals & Cash Flow** | Combine goals-based funding with comprehensive, year-by-year cash-flow planning. |
-| **Foundational Planning** | The holistic full picture — net worth, allocation, retirement outlook, and goal funding in one confident view. |
+| **Foundational Planning** | The holistic full picture — net worth, allocation, retirement outlook, goal funding, and a **Monte Carlo** panel (600 randomized-return simulations) with a probability-of-success gauge and a 10th–90th-percentile outcome fan chart. |
 | **Tax Planning** | Real tax engine: current-year federal/state/FICA, a bracket visualization with conversion headroom, lifetime (cumulative) taxes, an RMD schedule, and a **bracket-based Roth-conversion analyzer** showing lifetime tax savings and estate impact. |
-| **Decision Center** | Model **life events** (a child, college, inheritance, a major purchase, long-term care, a market downturn, paying off the mortgage) and what-if sliders, compared against the current plan in real time. |
+| **Decision Center** | Model **life events** (a child, college, inheritance, a major purchase, long-term care, a market downturn, paying off the mortgage) and what-if sliders compared against the current plan in real time, plus a **Social Security claiming optimizer** that compares claiming at 62 / FRA / 70 and flags the lifetime-maximizing age (with one click to apply it). |
 | **CoPlanner** | Automated insights and a plan-readiness score that turn client data into ready-to-use planning actions. |
 | **Report Center** | Generate a branded, multi-page client report (now including a tax page) and print it or save it as a PDF. |
 
@@ -71,6 +71,9 @@ python3 -m http.server 8000      # then visit http://localhost:8000
 
 > The app works fully offline; if there's no internet it simply falls back to
 > elegant system fonts.
+
+**Fast data entry:** in any dollar field you can type shorthand — `250k` becomes
+`250,000` and `1.2m` becomes `1,200,000` — so you can keep pace with the client.
 
 ### Saving client plans
 - Your work **auto-saves** to this browser on the same computer ("Saved"
