@@ -15,7 +15,7 @@ Eight modules, mapped to the way you actually run a planning conversation:
 
 | Module | Purpose |
 | --- | --- |
-| **Dashboard** | One-screen snapshot — net worth, retirement funding, savings rate, protection gap, projection, goals, and top insights. |
+| **Dashboard** | A client-friendly command center with an **interactive plan timeline** — drag the year scrubber to walk through every year of the plan and watch the portfolio, income mix, taxes, and life-stage milestones update live (a natural talking point in the meeting). Plus headline KPIs, goal funding, and top insights. |
 | **Client Profile** | Capture the household's full picture — people, income, expenses, savings, accounts, debts, insurance, and assumptions. Everything else is driven from here. |
 | **Needs Analysis** | Fast, single-goal estimates (retirement, education, protection) to **engage prospects quickly** and create immediate impact. |
 | **Goals & Cash Flow** | Combine goals-based funding with comprehensive, year-by-year cash-flow planning. |

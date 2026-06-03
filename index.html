@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>Matthew Pindoley, SE-AWMA® — Financial Planning</title>
-<meta name="description" content="A fiduciary financial planning workspace — goals-based & cash flow planning, needs analysis, foundational & advanced planning, and automated insights."/>
+<meta name="description" content="A fiduciary financial planning workspace — goals-based & cash flow planning, needs analysis, foundational & advanced planning, tax strategy, and automated insights."/>
 <meta name="theme-color" content="#0F1A2B"/>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -13,76 +13,96 @@
 </head>
 <body data-view="dashboard">
 
-<!-- ─────────────────────────  TOP BAR  ───────────────────────── -->
-<header id="topbar">
-  <div class="brand">
-    <div class="brand-mark" aria-hidden="true">MP</div>
-    <div class="brand-text">
-      <div class="brand-name">Matthew Pindoley, <span>SE-AWMA®</span></div>
-      <div class="brand-sub">Wealth, Engineered for Generations</div>
+<div id="app">
+
+  <!-- ─────────────────────────  SIDEBAR  ───────────────────────── -->
+  <aside id="sidebar">
+    <div class="sb-brand">
+      <div class="brand-mark" aria-hidden="true">MP</div>
+      <div class="brand-text">
+        <div class="brand-name">Matthew Pindoley<span>SE-AWMA®</span></div>
+        <div class="brand-sub">Wealth, Engineered for Generations</div>
+      </div>
     </div>
+
+    <nav id="modnav" aria-label="Planning modules">
+      <button class="navlink active" data-view="dashboard">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
+        <span>Dashboard</span></button>
+      <button class="navlink" data-view="profile">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/></svg>
+        <span>Client Profile</span></button>
+      <button class="navlink" data-view="needs">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.4"/></svg>
+        <span>Needs Analysis</span></button>
+      <button class="navlink" data-view="cashflow">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h3.5l3 7 4-15 3 8H21"/></svg>
+        <span>Goals &amp; Cash Flow</span></button>
+      <button class="navlink" data-view="foundational">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+        <span>Foundational</span></button>
+      <button class="navlink" data-view="tax">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="19" y1="5" x2="5" y2="19"/><circle cx="7.5" cy="7.5" r="2.2"/><circle cx="16.5" cy="16.5" r="2.2"/></svg>
+        <span>Tax Planning</span></button>
+      <button class="navlink" data-view="decision">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><line x1="4" y1="8" x2="20" y2="8"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="9" cy="8" r="2.4"/><circle cx="15" cy="16" r="2.4"/></svg>
+        <span>Decision Center</span></button>
+      <button class="navlink" data-view="coplanner">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.4L19 10l-5.2 1.6L12 17l-1.8-5.4L5 10l5.2-1.6z"/></svg>
+        <span>CoPlanner</span></button>
+    </nav>
+
+    <div class="sb-foot">
+      <span class="nav-status" id="saveStatus">Saved</span>
+      <span class="sb-tag">Confidential workspace</span>
+    </div>
+  </aside>
+
+  <!-- ─────────────────────────  CONTENT  ───────────────────────── -->
+  <div id="content">
+
+    <header id="topbar">
+      <div class="plan-switch">
+        <button id="planMenuBtn" class="plan-current" aria-haspopup="true" aria-expanded="false">
+          <span class="plan-avatar" id="planAvatar" aria-hidden="true">H</span>
+          <span class="plan-meta"><span class="plan-label">Active Plan</span><span class="plan-name" id="planNameLabel">New Client</span></span>
+          <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
+        </button>
+        <div id="planMenu" class="plan-menu" role="menu" hidden></div>
+      </div>
+
+      <div class="topbar-actions">
+        <button class="icon-btn" id="privacyBtn" title="Privacy — blur all dollar amounts (P)" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
+          <span>Privacy</span></button>
+        <button class="icon-btn" id="presentBtn" title="Enter client presentation mode (F)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M8 20h8M12 16v4"/></svg>
+          <span>Present</span></button>
+        <button class="icon-btn gold" id="reportBtn" title="Open report &amp; print center">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
+          <span>Report</span></button>
+        <button class="icon-btn safe" id="safeBtn" title="Safe screen — instantly cover everything (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/></svg>
+          <span>Safe</span></button>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="view active" data-view="dashboard"></section>
+      <section class="view" data-view="profile"></section>
+      <section class="view" data-view="needs"></section>
+      <section class="view" data-view="cashflow"></section>
+      <section class="view" data-view="foundational"></section>
+      <section class="view" data-view="tax"></section>
+      <section class="view" data-view="decision"></section>
+      <section class="view" data-view="coplanner"></section>
+    </main>
   </div>
-
-  <div class="plan-switch">
-    <button id="planMenuBtn" class="plan-current" aria-haspopup="true" aria-expanded="false">
-      <span class="plan-label">Plan</span>
-      <span class="plan-name" id="planNameLabel">New Client</span>
-      <svg viewBox="0 0 24 24" class="chev" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg>
-    </button>
-    <div id="planMenu" class="plan-menu" role="menu" hidden></div>
-  </div>
-
-  <div class="topbar-actions">
-    <button class="icon-btn" id="privacyBtn" title="Privacy — blur all dollar amounts (P)" aria-pressed="false">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>
-      <span>Privacy</span>
-    </button>
-    <button class="icon-btn" id="presentBtn" title="Enter client presentation mode (F)">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 4h18v12H3z"/><path d="M8 20h8M12 16v4"/></svg>
-      <span>Present</span>
-    </button>
-    <button class="icon-btn" id="reportBtn" title="Open report &amp; print center">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 2h9l5 5v15H6z"/><path d="M14 2v6h6M9 13h6M9 17h6"/></svg>
-      <span>Report</span>
-    </button>
-    <button class="icon-btn safe" id="safeBtn" title="Safe screen — instantly cover everything (Esc toggles)">
-      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2l8 4v6c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6z"/></svg>
-      <span>Safe</span>
-    </button>
-  </div>
-</header>
-
-<!-- ─────────────────────────  NAV  ───────────────────────── -->
-<nav id="modnav" aria-label="Planning modules">
-  <button class="navlink active" data-view="dashboard"><span class="nl-ico">◆</span> Dashboard</button>
-  <button class="navlink" data-view="profile"><span class="nl-ico">◷</span> Client Profile</button>
-  <button class="navlink" data-view="needs"><span class="nl-ico">◐</span> Needs Analysis</button>
-  <button class="navlink" data-view="cashflow"><span class="nl-ico">≋</span> Goals &amp; Cash Flow</button>
-  <button class="navlink" data-view="foundational"><span class="nl-ico">▦</span> Foundational</button>
-  <button class="navlink" data-view="tax"><span class="nl-ico">§</span> Tax Planning</button>
-  <button class="navlink" data-view="decision"><span class="nl-ico">⟁</span> Decision Center</button>
-  <button class="navlink" data-view="coplanner"><span class="nl-ico">✦</span> CoPlanner</button>
-  <div class="nav-spacer"></div>
-  <span class="nav-status" id="saveStatus">Saved</span>
-</nav>
-
-<!-- ─────────────────────────  MAIN  ───────────────────────── -->
-<main id="main">
-  <section class="view active" data-view="dashboard"></section>
-  <section class="view" data-view="profile"></section>
-  <section class="view" data-view="needs"></section>
-  <section class="view" data-view="cashflow"></section>
-  <section class="view" data-view="foundational"></section>
-  <section class="view" data-view="tax"></section>
-  <section class="view" data-view="decision"></section>
-  <section class="view" data-view="coplanner"></section>
-</main>
+</div>
 
 <!-- ─────────────────────────  PRESENTATION CHROME  ───────────────────────── -->
 <div id="presentBar" hidden>
-  <div class="pb-left">
-    <span class="pb-brand">Matthew Pindoley, <em>SE-AWMA®</em></span>
-  </div>
+  <div class="pb-left"><span class="pb-brand">Matthew Pindoley, <em>SE-AWMA®</em></span></div>
   <div class="pb-center" id="presentTabs"></div>
   <div class="pb-right">
     <button class="pb-btn" id="presentPrivacy" title="Blur amounts">Privacy</button>
@@ -90,7 +110,6 @@
   </div>
 </div>
 
-<!-- Dark gold cover slide used at the start of presentation mode -->
 <div id="coverSlide" hidden>
   <div class="cover-inner">
     <div class="cover-eyebrow">A Financial Plan Prepared For</div>
@@ -99,7 +118,7 @@
     <div class="cover-advisor">Matthew Pindoley, <em>SE-AWMA®</em></div>
     <div class="cover-tag">Wealth, Engineered for Generations</div>
     <div class="cover-date" id="coverDate"></div>
-    <button class="cover-go" id="coverGo">Begin &rarr;</button>
+    <button class="cover-go" id="coverGo">Begin the Review &rarr;</button>
   </div>
 </div>
 
@@ -128,12 +147,8 @@
   </div>
 </div>
 
-<!-- Hidden container the print report is rendered into -->
 <div id="reportRoot" aria-hidden="true"></div>
-
-<!-- Toast -->
 <div id="toast" hidden></div>
-
 <input id="importFile" type="file" accept="application/json,.json" hidden>
 
 <script src="app.js"></script>

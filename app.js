@@ -128,22 +128,22 @@ function saveStore(s) { try { localStorage.setItem(LS_KEY, JSON.stringify(s)); r
 function planLabel(st) { return (st.household?.client?.name || '').trim() || 'New Client'; }
 
 /* ----------------------------- tax engine --------------------------------- */
-/* 2025 federal parameters (inflated forward by assumed inflation each year). */
+/* 2026 federal parameters (IRS Rev. Proc. 2025-32), inflated forward each year. */
 const TAX = {
-  baseYear: 2025,
-  std: { married: 31500, single: 15750, hoh: 23625 },
+  baseYear: 2026,
+  std: { married: 32200, single: 16100, hoh: 24150 },
   brackets: {
-    married: [[0, .10], [23850, .12], [96950, .22], [206700, .24], [394600, .32], [501050, .35], [751600, .37]],
-    single:  [[0, .10], [11925, .12], [48475, .22], [103350, .24], [197300, .32], [250525, .35], [626350, .37]],
-    hoh:     [[0, .10], [17000, .12], [64850, .22], [103350, .24], [197300, .32], [250500, .35], [626350, .37]]
+    married: [[0, .10], [24800, .12], [100800, .22], [211100, .24], [402500, .32], [511300, .35], [767000, .37]],
+    single:  [[0, .10], [12400, .12], [50400, .22], [105700, .24], [201775, .32], [256225, .35], [640600, .37]],
+    hoh:     [[0, .10], [17700, .12], [67450, .22], [105700, .24], [201775, .32], [256200, .35], [640600, .37]]
   },
   ltcg: {
-    married: [[0, 0], [96700, .15], [600050, .20]],
-    single:  [[0, 0], [48350, .15], [533400, .20]],
-    hoh:     [[0, 0], [64750, .15], [566700, .20]]
+    married: [[0, 0], [98900, .15], [613700, .20]],
+    single:  [[0, 0], [49450, .15], [545500, .20]],
+    hoh:     [[0, 0], [66200, .15], [579650, .20]]
   },
   ssBase: { married: [32000, 44000], single: [25000, 34000], hoh: [25000, 34000] },
-  ficaWageBase: 176100, ficaSS: 0.062, ficaMed: 0.0145
+  ficaWageBase: 184500, ficaSS: 0.062, ficaMed: 0.0145
 };
 const RMD_TABLE = { 72: 27.4, 73: 26.5, 74: 25.5, 75: 24.6, 76: 23.7, 77: 22.9, 78: 22.0, 79: 21.1, 80: 20.2, 81: 19.4, 82: 18.5, 83: 17.7, 84: 16.8, 85: 16.0, 86: 15.2, 87: 14.4, 88: 13.7, 89: 12.9, 90: 12.2, 91: 11.5, 92: 10.8, 93: 10.1, 94: 9.5, 95: 8.9, 96: 8.4, 97: 7.8, 98: 7.3, 99: 6.8, 100: 6.4, 101: 6.0, 102: 5.6, 103: 5.2, 104: 4.9, 105: 4.6 };
 const rmdDivisor = age => (age < 72 ? 0 : (RMD_TABLE[Math.min(105, Math.round(age))] || 4.6));
@@ -595,7 +595,12 @@ function lineChart(series, opts = {}) {
     }
     paths += `<path class="line" d="${d}" stroke="${s.color}"${s.dash ? ' stroke-dasharray="5 4"' : ''}/>`;
   });
-  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">${grid}${mk}${paths}<line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${ylab}${xlab}</svg>`;
+  let hi = '';
+  if (opts.highlight) {
+    const hx = sx(opts.highlight.x), hy = sy(opts.highlight.y), col = opts.highlight.color || 'var(--gold-deep)';
+    hi = `<line x1="${hx.toFixed(1)}" y1="${pad.t}" x2="${hx.toFixed(1)}" y2="${H - pad.b}" stroke="${col}" stroke-width="1.5" stroke-dasharray="4 3" opacity=".65"/><circle cx="${hx.toFixed(1)}" cy="${hy.toFixed(1)}" r="6" fill="${col}" stroke="#fff" stroke-width="2.5"/>`;
+  }
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet" role="img">${grid}${mk}${paths}${hi}<line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${ylab}${xlab}</svg>`;
 }
 
 function barChart(items, opts = {}) {
@@ -795,6 +800,7 @@ function saveCurrent() {
 const scheduleSave = debounce(saveCurrent, 600);
 function updateHeader() {
   $('#planNameLabel').textContent = planLabel(STATE);
+  const av = $('#planAvatar'); if (av) av.textContent = (planLabel(STATE).trim()[0] || '?').toUpperCase();
   const cc = $('#coverClient'); if (cc) cc.textContent = clientNames();
 }
 
@@ -882,30 +888,110 @@ function netWorthTable(R) {
 }
 
 /* ----------------------------- DASHBOARD ---------------------------------- */
+let dashAge = null;
+const eventTypeLabel = t => (EVENT_TYPES.find(e => e[0] === t) || [, 'Event'])[1];
+function heroAges(R) {
+  const c = STATE.household.client, sp = STATE.household.spouse;
+  let s = `${escapeHtml(c.name || 'Client')} age ${R.curAge}`;
+  if (R.spOn && sp.name) s += `  ·  ${escapeHtml(sp.name)} age ${+sp.age || 0}`;
+  return s;
+}
+function getMilestones(R) {
+  const m = {}, add = (age, txt) => { if (age == null || isNaN(age)) return; age = Math.round(age); (m[age] = m[age] || []).push(txt); };
+  const c = STATE.household.client, sp = STATE.household.spouse, I = STATE.income, spDiff = R.curAge - (+sp.age || R.curAge);
+  add(R.retAge, `${escapeHtml(c.name || 'Client')} retires`);
+  if (R.spOn) add((+sp.retireAge || 65) + spDiff, `${escapeHtml(sp.name || 'Spouse')} retires`);
+  add(+I.ssClaimClient || R.retAge, `Social Security begins`);
+  if (R.spOn) add((+I.ssClaimSpouse || 67) + spDiff, `${escapeHtml(sp.name || 'Spouse')}’s Social Security`);
+  add(+STATE.assumptions.rmdStartAge, `Required distributions (RMDs) begin`);
+  (STATE.events || []).forEach(ev => {
+    const label = (ev.label || '').trim() || eventTypeLabel(ev.type);
+    if (['child', 'college', 'ltc', 'income', 'expenseRecurring'].includes(ev.type)) add(+ev.startAge, label + ' begins');
+    else add(+ev.atAge, label);
+  });
+  return m;
+}
 function renderDashboard() {
   const R = RESULTS, ins = buildInsights(R).slice(0, 3);
-  const who = R.spOn && STATE.household.spouse.name ? `${escapeHtml(STATE.household.client.name || 'Client')} & ${escapeHtml(STATE.household.spouse.name)}` : escapeHtml(STATE.household.client.name || 'New Client');
-  const retCaption = R.depletionAge != null
-    ? `<span class="val-bad">Assets projected to last until age ${R.depletionAge}</span>`
-    : `Projected balance at age ${R.life}: <b class="amount">${fmt$(R.endingBalance)}</b>`;
-  getViewEl('dashboard').innerHTML = headBlock('Overview', who,
-    `Financial plan snapshot · ${DATESTR}`,
-    `<button class="btn advisor-only" data-action="goto" data-view="profile">Edit Profile</button><button class="btn gold advisor-only" data-action="open-report">Generate Report</button>`) +
-  `<div class="grid cols-4" style="margin-bottom:1.1rem">
-    ${statCard('Net Worth', fmt$(R.netWorth), { tone: R.netWorth >= 0 ? 'good' : 'bad', note: `${money(R.totalAssets)} assets · ${money(R.totalLiab)} debt` })}
-    ${statCard('Retirement Funded', pct(R.fundedRatio * 100, 0), { raw: true, tone: tone(R.fundedRatio), valClass: 'val-' + tone(R.fundedRatio), note: R.surplus >= 0 ? `Surplus ${money(R.surplus)}` : `Gap ${money(-R.surplus)}` })}
-    ${statCard('Savings Rate', pct(R.savingsRate * 100, 0), { raw: true, tone: R.savingsRate >= 0.15 ? 'good' : R.savingsRate >= 0.1 ? 'warn' : 'bad', note: `${money(R.annualSavings)}/yr saved` })}
-    ${statCard('Protection Gap', R.protGap > 0 ? fmt$(R.protGap) : 'Covered', { raw: R.protGap <= 0, tone: R.protGap > 0 ? 'warn' : 'good', note: `${money(R.existingLife)} in force` })}
-  </div>
-  <div class="split" style="grid-template-columns:1.5fr 1fr">
-    ${panel('Retirement Projection', lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire ' + R.retAge }] }) +
-      `<div class="legend"><span><i class="dot" style="background:var(--gold)"></i>Investment portfolio</span><span>${retCaption}</span></div>`,
-      { sub: `Ages ${R.curAge}–${R.endAge}`, hideKey: 'dash-proj' })}
-    <div>${panel('Goal Funding', goalProgressList(R), { hideKey: 'dash-goals' })}</div>
-  </div>
-  <div style="height:1.1rem"></div>
-  ${panel('CoPlanner — Top Insights', ins.map(insightHTML).join('') || '<div class="empty">Enter client data to generate insights.</div>',
-    { sub: 'Automated', headExtra: `<button class="btn sm" data-action="goto" data-view="coplanner">View all</button>` })}`;
+  if (dashAge == null || dashAge < R.curAge || dashAge > R.endAge) dashAge = clamp(R.retAge, R.curAge, R.endAge);
+  const who = clientNames();
+  const healthBad = R.depletionAge != null && R.depletionAge < R.life;
+  const t3 = healthBad ? 'bad' : (R.depletionAge != null ? 'warn' : 'good');
+  const healthText = healthBad ? `Attention — assets run low at age ${R.depletionAge}`
+    : (R.depletionAge != null ? `Funded, but review plan longevity` : `On track — funded through age ${R.life}`);
+  getViewEl('dashboard').innerHTML = `
+    <div class="dash-hero">
+      <div>
+        <div class="dh-eyebrow">Financial Plan · ${DATESTR}</div>
+        <div class="dh-name">${escapeHtml(who)}</div>
+        <div class="dh-meta">${heroAges(R)}  ·  plan horizon to age ${R.endAge}</div>
+      </div>
+      <div style="display:flex;gap:.6rem;align-items:center;flex-wrap:wrap">
+        <div class="dh-status"><span class="dot" style="background:var(--${t3})"></span>${healthText}</div>
+        <button class="btn advisor-only" data-action="goto" data-view="profile">Edit</button>
+        <button class="btn gold advisor-only" data-action="open-report">Report</button>
+      </div>
+    </div>
+    <div class="grid cols-4" style="margin-bottom:1.3rem">
+      ${statCard('Net Worth', fmt$(R.netWorth), { tone: R.netWorth >= 0 ? 'good' : 'bad', note: `${money(R.totalAssets)} assets · ${money(R.totalLiab)} debt` })}
+      ${statCard('Retirement Funded', pct(R.fundedRatio * 100, 0), { raw: true, tone: tone(R.fundedRatio), valClass: 'val-' + tone(R.fundedRatio), note: R.surplus >= 0 ? `Surplus ${money(R.surplus)}` : `Gap ${money(-R.surplus)}` })}
+      ${statCard('Plan Lasts To', R.depletionAge != null ? 'Age ' + R.depletionAge : 'Age ' + R.life + '+', { raw: true, tone: t3, valClass: 'val-' + t3, note: R.depletionAge != null ? 'projected depletion' : `${money(R.endingBalance)} ending` })}
+      ${statCard('Lifetime Taxes', fmtK(R.lifetimeTax), { tone: 'warn', note: `${money(R.lifetimeFedTax)} federal` })}
+    </div>
+    ${dashTimeline(R)}
+    <div style="height:1.3rem"></div>
+    <div class="split" style="grid-template-columns:1fr 1fr">
+      ${panel('Goal Funding', goalProgressList(R), { hideKey: 'dash-goals', headExtra: `<button class="btn sm advisor-only" data-action="goto" data-view="cashflow">Manage</button>` })}
+      ${panel('Top Insights', ins.map(insightHTML).join('') || '<div class="empty">Enter client data to generate insights.</div>',
+        { sub: 'CoPlanner', headExtra: `<button class="btn sm advisor-only" data-action="goto" data-view="coplanner">View all</button>` })}
+    </div>`;
+  updateDashScrub();
+}
+function dashTimeline(R) {
+  return `<div class="timeline">
+    <div class="tl-main">
+      <div class="tl-main-head"><h3>Plan Timeline</h3><span class="ph-sub">Drag to walk through every year</span></div>
+      <div class="tl-chart-wrap" id="tlChart"></div>
+      <div class="scrubber-wrap">
+        <input type="range" class="scrubber" min="${R.curAge}" max="${R.endAge}" step="1" value="${dashAge}" data-scrub aria-label="Select year">
+        <div class="scrub-ticks"><span>Age ${R.curAge}</span><span>Retire ${R.retAge}</span><span>Age ${R.endAge}</span></div>
+        <div class="scrub-hint" id="tlHint"></div>
+      </div>
+    </div>
+    <div class="tl-side" id="tlSide"></div>
+  </div>`;
+}
+function updateDashScrub() {
+  const R = RESULTS, row = R.rows.find(r => r.age === dashAge) || R.rows[0]; if (!row) return;
+  const chart = $('#tlChart');
+  if (chart) chart.innerHTML = lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire' }], highlight: { x: dashAge, y: row.end }, h: 248 });
+  const comp = [
+    { label: 'Wages', value: row.wages || 0, color: 'var(--gold)' },
+    { label: 'Social Security', value: row.ss || 0, color: 'var(--ink)' },
+    { label: 'Pension', value: row.pension || 0, color: '#7c8aa0' },
+    { label: 'RMD', value: row.rmd || 0, color: '#b08968' },
+    { label: 'Portfolio', value: Math.max(0, (row.withdrawal || 0) - (row.rmd || 0)), color: 'var(--good)' }
+  ].filter(x => x.value > 0);
+  const totalIn = comp.reduce((s, x) => s + x.value, 0) || 1;
+  const compbar = comp.map(x => `<i style="width:${(x.value / totalIn * 100).toFixed(1)}%;background:${x.color}"></i>`).join('') || '<i style="width:100%;background:var(--ivory-2)"></i>';
+  const complegend = comp.map(x => `<span><i class="dot" style="background:${x.color}"></i>${x.label}</span>`).join('');
+  const ms = getMilestones(R)[dashAge];
+  const spAge = R.spOn ? (+STATE.household.spouse.age || 0) + (dashAge - R.curAge) : null;
+  const side = $('#tlSide');
+  if (side) side.innerHTML = `
+    <div class="tl-year">${row.year} · ${row.phase === 'work' ? 'Working years' : 'Retirement'}</div>
+    <div class="tl-age">${dashAge}<small> &nbsp;${escapeHtml((STATE.household.client.name || 'client').split(' ')[0])}</small></div>
+    ${R.spOn ? `<div class="tl-phase">${escapeHtml((STATE.household.spouse.name || 'spouse').split(' ')[0])} is ${spAge}</div>` : ''}
+    <div style="margin-top:.9rem"><div class="compbar">${compbar}</div><div class="comp-legend">${complegend}</div></div>
+    <div class="tl-rows">
+      <div class="tl-row"><span>Portfolio</span><b class="amount big">${fmt$(row.end)}</b></div>
+      <div class="tl-row"><span>Net worth</span><b class="amount">${fmt$(row.netWorth)}</b></div>
+      <div class="tl-row"><span>Total income</span><b class="amount">${fmt$(totalIn)}</b></div>
+      <div class="tl-row"><span>Spending</span><b class="amount">${fmt$(row.expenses)}</b></div>
+      <div class="tl-row"><span>Taxes</span><b class="amount">${fmt$(row.taxes)}</b></div>
+    </div>
+    <div class="tl-milestone ${ms ? '' : 'none'}"><span class="m-ico">${ms ? '★' : '•'}</span><span>${ms ? ms.join(' · ') : 'A steady year on plan'}</span></div>`;
+  const hint = $('#tlHint'); if (hint) hint.innerHTML = `Showing <b>age ${dashAge}</b> · ${row.year} — drag the slider to explore`;
 }
 function goalProgressList(R) {
   if (!R.goals.length) return '<div class="empty">No goals yet.</div>';
@@ -1044,7 +1130,7 @@ function liveNeeds() {
 function buildCashflow() {
   getViewEl('cashflow').innerHTML = headBlock('Plan', 'Goals & Cash Flow',
     'Combine goals-based funding with comprehensive, year-by-year cash flow — the right conversation at the right time.') +
-    `<div class="split"><div class="advisor-only io-inputs">
+    `<div class="split io-split"><div class="advisor-only io-inputs">
       ${panel('Goals', `<div id="goalsList">${(STATE.goals || []).map(goalRow).join('')}</div><button class="add-row" data-action="add-goal">＋ Add goal</button>`,
         { sub: 'Funding tracker' })}
     </div><div id="res-cashflow"></div></div>`;
@@ -1210,25 +1296,28 @@ function miniMetric(label, val, t) {
 }
 
 /* ----------------------------- TAX PLANNING ------------------------------- */
-function taxBracketBar(income, brackets, marginal) {
+function taxBracketBar(income, brackets) {
   let idx = 0; for (let i = 0; i < brackets.length; i++) if (income >= brackets[i][0]) idx = i;
-  const showTop = idx + 2 < brackets.length ? brackets[idx + 2][0] : (idx + 1 < brackets.length ? brackets[idx + 1][0] * 1.25 : Math.max(income * 1.4, 1));
-  const W = 760, H = 76, x0 = 6, x1 = W - 6, sc = v => x0 + Math.min(v, showTop) / showTop * (x1 - x0);
-  const colors = ['#d7e6df', '#c3dccf', '#ecd6a8', '#e0c88f', '#d3a96a', '#c5923f', '#a9701c'];
-  let segs = '';
+  const showTop = idx + 1 < brackets.length ? brackets[idx + 1][0] * 1.05 : Math.max(income * 1.3, 1);
+  const W = 760, H = 118, x0 = 10, x1 = W - 10, top = 60, barH = 30;
+  const sc = v => x0 + Math.min(v, showTop) / showTop * (x1 - x0);
+  const colors = ['#e1ebe4', '#d2e1d7', '#efddb8', '#e7cf9c', '#dcb67d', '#cea05a', '#b58236'];
+  let segs = '', ticks = '';
   for (let i = 0; i < brackets.length; i++) {
     const lo = brackets[i][0], hi = i + 1 < brackets.length ? brackets[i + 1][0] : showTop;
     if (lo >= showTop) break;
-    const a = sc(lo), b = sc(hi);
-    segs += `<rect x="${a.toFixed(1)}" y="26" width="${(b - a).toFixed(1)}" height="24" fill="${colors[i]}"/>`;
-    segs += `<text class="lbl" x="${a + 3}" y="64" style="font-weight:600">${Math.round(brackets[i][1] * 100)}%</text>`;
-    if (i > 0) segs += `<text class="lbl" x="${a}" y="20" text-anchor="middle">${fmtK(lo)}</text>`;
+    const a = sc(lo), b = sc(hi), w = b - a, cur = i === idx;
+    segs += `<rect x="${a.toFixed(1)}" y="${top}" width="${w.toFixed(1)}" height="${barH}" rx="2" fill="${colors[i]}"${cur ? ' stroke="var(--gold-deep)" stroke-width="1.6"' : ''}/>`;
+    if (w > 24) segs += `<text x="${(a + w / 2).toFixed(1)}" y="${top + barH / 2 + 4}" text-anchor="middle" style="font-size:11px;font-weight:700;fill:var(--ink-2)">${Math.round(brackets[i][1] * 100)}%</text>`;
+    if (i > 0) ticks += `<text x="${a.toFixed(1)}" y="${top + barH + 16}" text-anchor="middle" class="lbl">${fmtK(lo)}</text>`;
   }
-  const fx = sc(income);
+  const fx = sc(income), cx = clamp(fx, 70, W - 70);
   return `<svg class="chart" viewBox="0 0 ${W} ${H}">${segs}
-    <rect x="${x0}" y="26" width="${(fx - x0).toFixed(1)}" height="24" fill="rgba(15,26,43,.20)"/>
-    <line x1="${fx.toFixed(1)}" y1="18" x2="${fx.toFixed(1)}" y2="54" stroke="var(--ink)" stroke-width="2.5"/>
-    <text class="lbl-strong amount" x="${clamp(fx, 60, W - 60).toFixed(1)}" y="14" text-anchor="middle">Taxable income ${fmtK(income)}</text></svg>`;
+    <rect x="${x0}" y="${top}" width="${(fx - x0).toFixed(1)}" height="${barH}" rx="2" fill="rgba(15,26,43,.13)"/>
+    <line x1="${fx.toFixed(1)}" y1="${top - 8}" x2="${fx.toFixed(1)}" y2="${top + barH + 6}" stroke="var(--ink)" stroke-width="2"/>
+    <circle cx="${fx.toFixed(1)}" cy="${top - 8}" r="3.5" fill="var(--ink)"/>
+    <text x="${cx.toFixed(1)}" y="${top - 30}" text-anchor="middle" style="font-size:10px;letter-spacing:.06em;font-weight:700;fill:var(--gold-deep)">YOUR TAXABLE INCOME</text>
+    <text x="${cx.toFixed(1)}" y="${top - 15}" text-anchor="middle" class="amount" style="font-size:14px;font-weight:700;fill:var(--ink)">${fmt$(income)}</text>${ticks}</svg>`;
 }
 function buildTax() {
   const rothControls =
@@ -1248,7 +1337,7 @@ function buildTax() {
     fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, STATE.household.spouse.included ? { path: 'income.ssClaimSpouse', label: 'SS claim — spouse', type: 'age' } : { path: 'assumptions.rmdStartAge', label: 'RMD start age', type: 'age' });
   getViewEl('tax').innerHTML = headBlock('Tax Strategy', 'Tax Planning',
     'See the tax impact of the plan in real time — current brackets, lifetime taxes, RMDs, and bracket-based Roth conversions. Estimates to guide the conversation and the client’s CPA.') +
-    `<div class="split"><div class="advisor-only io-inputs">
+    `<div class="split io-split"><div class="advisor-only io-inputs">
       ${panel('Tax Inputs', taxAssumptions, { sub: 'Drives every projection' })}
       ${panel('Roth Conversion Analyzer', rothControls, { sub: 'What-if' })}
     </div><div id="res-tax"></div></div>`;
@@ -1531,6 +1620,7 @@ function onInput(e) {
     const lbl = $('#scnv-' + k); if (lbl) lbl.textContent = fmtScn(k, SCENARIO[k]);
     liveDecision(); return;
   }
+  if (t.matches('[data-scrub]')) { dashAge = +t.value; updateDashScrub(); return; }
 }
 function onClick(e) {
   if (!$('#planMenu').hidden && !e.target.closest('.plan-switch')) closePlanMenu();
