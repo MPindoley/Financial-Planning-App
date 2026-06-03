@@ -353,7 +353,8 @@ body.present .stat .s-value{font-size:2.35rem}
 body.present .present-hide{display:none !important}
 body.present [data-client-hidden="true"]{display:none !important}
 /* When the advisor input column is hidden in presentation, let results use full width */
-body.present .io-split{grid-template-columns:1fr}
+body.present .io-split{grid-template-columns:1fr !important}
+body.present .split:has(> .advisor-only){grid-template-columns:1fr !important}
 
 #coverSlide{position:fixed;inset:0;z-index:80;background:
   radial-gradient(900px 620px at 70% 18%,rgba(200,164,106,.2),transparent 60%),
