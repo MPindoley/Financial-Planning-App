@@ -79,6 +79,7 @@ function defaultState() {
     events: [],
     rothStrategy: { on: false, mode: 'fill', toRate: 0.24, amount: 50000, startAge: 65, endAge: 72 },
     advisorNotes: '',
+    estate: { legacyTarget: 0, annualGifting: 0, charitableGoal: 0, hasWill: false, hasTrust: false, hasPOA: false, hasHealthDirective: false, beneficiariesConfirmed: false, estateNote: '' },
     ui: { collapsed: false }
   };
 }
@@ -497,7 +498,10 @@ function compute(S) {
   const c = H.client, sp = H.spouse, spOn = !!sp.included;
   const curAge = +c.age || 0, retAge = +c.retireAge || 0, life = +c.lifeExpectancy || 90;
   const endAge = Math.max(life, spOn ? (+sp.lifeExpectancy || life) : life);
-  const yearsToRet = Math.max(0, retAge - curAge), retYears = Math.max(1, life - retAge);
+  const alreadyRetired = curAge >= retAge;
+  const yearsToRet = alreadyRetired ? 0 : Math.max(0, retAge - curAge);
+  const retYears = Math.max(1, life - retAge);
+  const retHorizon = Math.max(0, life - curAge);   /* years of plan remaining from today */
 
   /* assets */
   const list = S.assets || []; const byType = {}; let totalAssets = 0;
@@ -520,16 +524,24 @@ function compute(S) {
   const emergencyMonths = annualExp > 0 ? cash / (annualExp / 12) : 0;
   const guaranteedToday = (+I.ssClient || 0) + (spOn ? (+I.ssSpouse || 0) : 0) + (+I.pension || 0);
 
-  /* retirement needs (clean "the number") */
-  const projAtRet = fv(investable, pre, yearsToRet) + fvAnnuity(annualSavings, pre, yearsToRet);
-  const needAtRet = retExpToday * pow(1 + infl, yearsToRet);
-  const guaranteedAtRet = guaranteedToday * pow(1 + infl, yearsToRet);
-  const gap1 = Math.max(0, needAtRet - guaranteedAtRet);
-  const capitalNeeded = pvGrowingAnnuity(gap1, post, infl, retYears);
+  /* retirement needs (clean "the number") — framing differs for clients already retired */
+  let projAtRet, needAtRet, guaranteedAtRet, capitalNeeded, extraMonthly;
+  if (alreadyRetired) {
+    projAtRet = investable;                                          // current portfolio (no future growth/savings added)
+    needAtRet = retExpToday;                                         // today's $, no inflation forward
+    guaranteedAtRet = guaranteedToday;
+    capitalNeeded = pvGrowingAnnuity(Math.max(0, needAtRet - guaranteedAtRet), post, infl, retHorizon);
+    extraMonthly = 0;
+  } else {
+    projAtRet = fv(investable, pre, yearsToRet) + fvAnnuity(annualSavings, pre, yearsToRet);
+    needAtRet = retExpToday * pow(1 + infl, yearsToRet);
+    guaranteedAtRet = guaranteedToday * pow(1 + infl, yearsToRet);
+    capitalNeeded = pvGrowingAnnuity(Math.max(0, needAtRet - guaranteedAtRet), post, infl, retYears);
+    extraMonthly = pmtForFV(Math.max(0, capitalNeeded - projAtRet), pre, yearsToRet) / 12;
+  }
   const fundedRatio = capitalNeeded > 0 ? projAtRet / capitalNeeded : (projAtRet > 0 ? 2 : 1);
   const surplus = projAtRet - capitalNeeded;
   const shortfallFV = Math.max(0, capitalNeeded - projAtRet);
-  const extraMonthly = pmtForFV(shortfallFV, pre, yearsToRet) / 12;
 
   /* year-by-year simulation (taxes, three tax buckets, debt amortization, RMDs, events) */
   const sim = simulate(S);
@@ -570,7 +582,7 @@ function compute(S) {
     { label: 'Other',        value: other,   color: '#b08968' }
   ].filter(x => x.value > 0);
 
-  return { curAge, retAge, life, endAge, yearsToRet, retYears, totalAssets, totalLiab, netWorth, byType,
+  return { curAge, retAge, life, endAge, yearsToRet, retYears, alreadyRetired, retHorizon, totalAssets, totalLiab, netWorth, byType,
     cash, taxable, trad, roth, eduAssets, re, investable, grossIncome, annualExp, retExpToday, annualSavings,
     savingsRate, emergencyMonths, guaranteedToday, projAtRet, needAtRet, guaranteedAtRet, capitalNeeded,
     fundedRatio, surplus, shortfallFV, extraMonthly, rows, endingBalance, depletionAge, eduFuture, eduProjected,
@@ -675,8 +687,9 @@ function lineChart(series, opts = {}) {
   let xlab = ''; const xt = opts.xticks || 6;
   for (let i = 0; i <= xt; i++) { const xv = xMin + (xMax - xMin) * i / xt; xlab += `<text class="lbl" x="${sx(xv)}" y="${H - 8}" text-anchor="middle">${Math.round(xv)}</text>`; }
   let mk = ''; (opts.markers || []).forEach(m => {
-    const mx = sx(m.x);
-    mk += `<line class="marker-line" x1="${mx}" y1="${pad.t}" x2="${mx}" y2="${H - pad.b}"/><text class="lbl-strong" x="${mx}" y="${pad.t + 9}" text-anchor="middle">${escapeHtml(m.label)}</text>`;
+    const atStart = m.x <= xMin;                 // e.g. an already-retired client: "Retire" sits at/before "now"
+    const mx = sx(atStart ? xMin : m.x);
+    mk += `<line class="marker-line" x1="${mx}" y1="${pad.t}" x2="${mx}" y2="${H - pad.b}"/><text class="lbl-strong" x="${mx}" y="${pad.t + 9}" text-anchor="middle">${escapeHtml(atStart ? 'Now' : m.label)}</text>`;
   });
   let paths = '';
   series.forEach(s => {
@@ -709,7 +722,7 @@ function bandChart(ages, lo, mid, hi, opts = {}) {
   const bot = ages.map((a, i) => `${sx(a).toFixed(1)} ${sy(lo[i]).toFixed(1)}`).reverse().map((p, i) => `${i ? 'L' : 'L'}${p}`).join(' ');
   const area = `<path d="${top} ${bot} Z" fill="var(--gold)" opacity=".18"/>`;
   const midPath = `<path class="line" d="${ages.map((a, i) => `${i ? 'L' : 'M'}${sx(a).toFixed(1)} ${sy(mid[i]).toFixed(1)}`).join(' ')}" stroke="var(--gold-deep)"/>`;
-  let mk = ''; (opts.markers || []).forEach(m => { const mx = sx(m.x); mk += `<line class="marker-line" x1="${mx}" y1="${pad.t}" x2="${mx}" y2="${H - pad.b}"/><text class="lbl-strong" x="${mx}" y="${pad.t + 9}" text-anchor="middle">${escapeHtml(m.label)}</text>`; });
+  let mk = ''; (opts.markers || []).forEach(m => { const atStart = m.x <= xMin; const mx = sx(atStart ? xMin : m.x); mk += `<line class="marker-line" x1="${mx}" y1="${pad.t}" x2="${mx}" y2="${H - pad.b}"/><text class="lbl-strong" x="${mx}" y="${pad.t + 9}" text-anchor="middle">${escapeHtml(atStart ? 'Now' : m.label)}</text>`; });
   return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${mk}${area}${midPath}<line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${ylab}${xlab}</svg>`;
 }
 function barChart(items, opts = {}) {
@@ -963,7 +976,7 @@ function newPlan(seed) {
   STATE = seed || defaultState();
   store.plans[currentPlanId] = { id: currentPlanId, name: planLabel(STATE), updatedAt: Date.now(), state: STATE };
   store.current = currentPlanId; saveStore(store);
-  resetBuilt(); RESULTS = compute(STATE); showView('profile'); refreshAll();
+  resetBuilt(); RESULTS = compute(STATE); showView(seed ? 'dashboard' : 'intake'); refreshAll();
 }
 function switchPlan(id) {
   const store = loadStore(); const p = store.plans[id]; if (!p) return;
@@ -1014,7 +1027,7 @@ function headBlock(eyebrow, title, sub, extra = '') {
 }
 function ensureDefaults(S) {
   const d = defaultState();
-  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
+  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
   S.household = S.household || d.household;
   S.household.client = Object.assign({}, d.household.client, S.household.client);
   S.household.spouse = Object.assign({}, d.household.spouse, S.household.spouse);
@@ -1139,7 +1152,7 @@ function dashTimeline(R) {
       <div class="tl-chart-wrap" id="tlChart"></div>
       <div class="scrubber-wrap">
         <input type="range" class="scrubber" min="${R.curAge}" max="${R.endAge}" step="1" value="${dashAge}" data-scrub aria-label="Select year">
-        <div class="scrub-ticks"><span>Age ${R.curAge}</span><span>Retire ${R.retAge}</span><span>Age ${R.endAge}</span></div>
+        <div class="scrub-ticks"><span>Age ${R.curAge}</span><span>${R.alreadyRetired ? 'Now ' + R.curAge : 'Retire ' + R.retAge}</span><span>Age ${R.endAge}</span></div>
         <div class="scrub-hint" id="tlHint"></div>
       </div>
     </div>
@@ -1352,8 +1365,14 @@ function buildCashflow() {
         { sub: 'Funding tracker' })}
     </div><div id="res-cashflow"></div></div>`;
 }
+let CF_GRANULARITY = 'all';   /* 'all' | 'five' — cash-flow table granularity */
+const cfGranularityToggle = () => `<span class="seg advisor-only" role="group" aria-label="Table granularity">
+  <button class="seg-btn ${CF_GRANULARITY === 'all' ? 'on' : ''}" data-action="cf-granularity" data-mode="all">Every year</button>
+  <button class="seg-btn ${CF_GRANULARITY === 'five' ? 'on' : ''}" data-action="cf-granularity" data-mode="five">Every 5 yrs</button></span>`;
 function cashflowTable(R) {
-  const rows = R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge);
+  const rows = CF_GRANULARITY === 'five'
+    ? R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge)
+    : R.rows;
   const body = rows.map(r => {
     const flow = r.phase === 'work' ? r.contribution : -r.withdrawal;
     return `<tr><td>${r.age}</td><td style="text-align:left"><span class="badge ${r.phase === 'work' ? 'gold' : 'ink'}">${r.phase === 'work' ? 'Working' : 'Retired'}</span></td>
@@ -1378,7 +1397,7 @@ function liveCashflow() {
     </div>` +
     panel('Goal Funding', goalProgressList(R) + reqHTML, { hideKey: 'cf-goals' }) +
     `<div style="height:1.1rem"></div>` +
-    panel('Cash Flow Projection', lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire' }] }) + cashflowTable(R), { sub: `Ages ${R.curAge}–${R.endAge}`, hideKey: 'cf-table' });
+    panel('Cash Flow Projection', lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire' }] }) + cashflowTable(R), { sub: `Ages ${R.curAge}–${R.endAge}`, hideKey: 'cf-table', headExtra: cfGranularityToggle() });
 }
 
 /* ----------------------------- FOUNDATIONAL ------------------------------- */
@@ -1414,7 +1433,9 @@ function renderFoundational() {
       ${statCard('Net Worth', fmt$(R.netWorth), { tone: R.netWorth >= 0 ? 'good' : 'bad' })}
       ${statCard('Investable Assets', fmt$(R.investable))}
       ${statCard('Retirement Funded', pct(R.fundedRatio * 100, 0), { raw: true, tone: tone(R.fundedRatio), valClass: 'val-' + tone(R.fundedRatio) })}
-      ${statCard('Years to Retirement', R.yearsToRet + ' yrs', { raw: true })}
+      ${R.alreadyRetired
+        ? statCard('In retirement', 'Retired at ' + R.retAge, { raw: true })
+        : statCard('Years to Retirement', R.yearsToRet + ' yrs', { raw: true })}
     </div>
     ${mcPanel()}
     <div style="height:1.1rem"></div>
@@ -1423,8 +1444,8 @@ function renderFoundational() {
       ${panel('Retirement Outlook',
         lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire ' + R.retAge }], h: 220 }) +
         `<div class="grid cols-2" style="gap:.7rem;margin:.8rem 0">
-          ${statCard('Capital Needed', fmt$(R.capitalNeeded), { small: true })}
-          ${statCard('Projected at Retire', fmt$(R.projAtRet), { small: true, tone: tone(R.fundedRatio) })}</div>
+          ${statCard('Capital Needed', fmt$(R.capitalNeeded), { small: true, note: R.alreadyRetired ? 'remaining lifetime' : undefined })}
+          ${statCard(R.alreadyRetired ? 'Current Portfolio' : 'Projected at Retire', fmt$(R.projAtRet), { small: true, tone: tone(R.fundedRatio) })}</div>
         ${progressBar('Funded ratio', R.fundedRatio, {})}
         <div class="section-label">Retirement income sources (first year)</div>${donut(sources, { size: 160 })}`, { hideKey: 'found-ret' })}
     </div>
@@ -1659,8 +1680,87 @@ function liveTax() {
 }
 
 /* ----------------------------- view switching ----------------------------- */
-const builders = { profile: buildProfile, needs: buildNeeds, cashflow: buildCashflow, decision: buildDecision, tax: buildTax };
-const liveFns = { dashboard: renderDashboard, profile: liveProfile, needs: liveNeeds, cashflow: liveCashflow, foundational: renderFoundational, decision: liveDecision, tax: liveTax, coplanner: renderCoplanner };
+/* ----------------------------- NEW CLIENT INTAKE -------------------------- */
+const INTAKE_SECTIONS = ['ih-household', 'ih-income', 'ih-expenses', 'ih-assets', 'ih-liabilities', 'ih-insurance', 'ih-retirement', 'ih-tax', 'ih-estate', 'ih-goals'];
+let intakeSeeded = false;
+function buildIntake() {
+  if (!intakeSeeded) { INTAKE_SECTIONS.forEach(id => OPEN_SECTIONS.add(id)); intakeSeeded = true; }   /* all sections open by default */
+  const spOn = STATE.household.spouse.included;
+  const filingOpts = [{ value: 'married', label: 'Married filing jointly' }, { value: 'single', label: 'Single' }, { value: 'hoh', label: 'Head of household' }];
+  const body =
+    collapsiblePanel('ih-household', '1 · Client & Household', `
+      ${fieldRow({ path: 'household.client.name', label: 'Client name', type: 'text', ph: 'Full name' }, { path: 'household.client.age', label: 'Age', type: 'age' })}
+      ${toggleField('household.spouse.included', 'Include spouse / partner', true)}
+      ${spOn ? fieldRow({ path: 'household.spouse.name', label: 'Spouse name', type: 'text' }, { path: 'household.spouse.age', label: 'Age', type: 'age' }) : ''}`) +
+    collapsiblePanel('ih-income', '2 · Income', `
+      ${fieldRow({ path: 'income.clientSalary', label: 'Client salary', type: 'currency' }, spOn ? { path: 'income.spouseSalary', label: 'Spouse salary', type: 'currency' } : { path: 'income.otherIncome', label: 'Other income', type: 'currency' })}
+      ${spOn ? fieldRow({ path: 'income.otherIncome', label: 'Other income', type: 'currency' }, { path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' }) : field({ path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' })}`) +
+    collapsiblePanel('ih-expenses', '3 · Expenses & Savings', `
+      ${fieldRow({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' }, { path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' })}
+      ${field({ path: 'savings.employerMatch', label: 'Employer match', type: 'currency' })}
+      ${sectionLabel('Where new savings go (tax treatment)')}
+      ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k/IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`) +
+    collapsiblePanel('ih-assets', '4 · Accounts & Assets', `<div id="assetsList">${(STATE.assets || []).map(assetRow).join('')}</div>
+      <button class="add-row" data-action="add-asset">＋ Add account</button>`, { sub: 'Investable, education & property' }) +
+    collapsiblePanel('ih-liabilities', '5 · Liabilities', `<div id="liabList">${(STATE.liabilities || []).map(liabRow).join('')}</div>
+      <button class="add-row" data-action="add-liab">＋ Add liability</button>`) +
+    collapsiblePanel('ih-insurance', '6 · Insurance & Protection', `
+      ${fieldRow({ path: 'insurance.lifeClient', label: 'Life insurance — client', type: 'currency' }, spOn ? { path: 'insurance.lifeSpouse', label: 'Life insurance — spouse', type: 'currency' } : { path: 'protection.finalExpenses', label: 'Final expenses', type: 'currency' })}
+      ${fieldRow({ path: 'protection.replacePct', label: 'Income replacement', type: 'percent' }, { path: 'protection.replaceYears', label: 'Years', type: 'number' })}
+      ${spOn ? field({ path: 'protection.finalExpenses', label: 'Final expenses', type: 'currency' }) : ''}
+      ${toggleField('protection.includeDebt', 'Cover outstanding debts')}
+      ${toggleField('protection.includeEducation', 'Cover education funding')}`) +
+    collapsiblePanel('ih-retirement', '7 · Retirement Goals', `
+      ${fieldRow({ path: 'household.client.retireAge', label: 'Retirement age', type: 'age' }, { path: 'household.client.lifeExpectancy', label: 'Life expectancy', type: 'age' })}
+      ${spOn ? fieldRow({ path: 'household.spouse.retireAge', label: 'Spouse retirement age', type: 'age' }, { path: 'household.spouse.lifeExpectancy', label: 'Spouse life expectancy', type: 'age' }) : ''}
+      ${field({ path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today', type: 'percent' })}
+      ${sectionLabel('Desired guaranteed income (annual, today’s $)')}
+      ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', type: 'currency' }, { path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' })}
+      ${spOn ? fieldRow({ path: 'income.ssSpouse', label: 'Social Security — spouse', type: 'currency' }, { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' }) : ''}
+      ${field({ path: 'income.pension', label: 'Pension', type: 'currency' })}`) +
+    collapsiblePanel('ih-tax', '8 · Tax Assumptions', `
+      ${fieldRow({ path: 'household.filing', label: 'Tax filing', type: 'select', options: filingOpts }, { path: 'household.state', label: 'State', type: 'text', ph: 'e.g. NY' })}
+      ${fieldRow({ path: 'assumptions.stateTaxRate', label: 'State income tax', type: 'percent' }, { path: 'assumptions.inflation', label: 'Inflation', type: 'percent' })}
+      ${fieldRow({ path: 'assumptions.preReturn', label: 'Return — pre-retire', type: 'percent' }, { path: 'assumptions.postReturn', label: 'Return — in retire', type: 'percent' })}`) +
+    collapsiblePanel('ih-estate', '9 · Estate Goals', `
+      ${fieldRow({ path: 'estate.legacyTarget', label: 'Legacy / estate target', type: 'currency' }, { path: 'estate.annualGifting', label: 'Annual gifting', type: 'currency' })}
+      ${field({ path: 'estate.charitableGoal', label: 'Charitable goal', type: 'currency' })}
+      ${sectionLabel('Estate documents in place')}
+      ${toggleField('estate.hasWill', 'Will')}
+      ${toggleField('estate.hasTrust', 'Living trust')}
+      ${toggleField('estate.hasPOA', 'Financial power of attorney')}
+      ${toggleField('estate.hasHealthDirective', 'Healthcare directive')}
+      ${toggleField('estate.beneficiariesConfirmed', 'Beneficiaries confirmed')}
+      ${field({ path: 'estate.estateNote', label: 'Estate notes', type: 'textarea', rows: 3, ph: 'Trustees, special wishes, follow-ups…' })}`) +
+    collapsiblePanel('ih-goals', '10 · Other Goals', `<div id="goalsList">${(STATE.goals || []).map(goalRow).join('')}</div>
+      <button class="add-row" data-action="add-goal">＋ Add goal</button>`, { sub: 'Education, purchases, custom' });
+
+  getViewEl('intake').innerHTML = headBlock('Begin', 'New Client Intake',
+    'Capture the household’s full picture in meeting order. Every field flows straight into the plan and every module — no re-entry.') +
+    `<div class="profile-layout"><div class="acc-stack">${body}
+       <button class="btn gold intake-cta" data-action="build-plan">Build the Plan →</button></div>
+     <aside class="rail"><div id="res-intake"></div>
+       <div style="height:1rem"></div>
+       <button class="btn gold" style="width:100%;justify-content:center" data-action="build-plan">Build the Plan →</button></aside></div>`;
+}
+function liveIntake() {
+  const el = $('#res-intake'); if (!el) return;
+  const R = RESULTS;
+  const mc = mcAsync(() => { if (currentView === 'intake') liveIntake(); });
+  const sPct = mc ? Math.round(mc.success * 100) : null;
+  const t3 = sPct == null ? '' : sPct >= 80 ? 'good' : sPct >= 60 ? 'warn' : 'bad';
+  el.innerHTML = panel('Plan Snapshot', `
+    <div class="grid cols-2" style="gap:.7rem;margin-bottom:.9rem">
+      ${statCard('Net Worth', fmt$(R.netWorth), { small: true, tone: R.netWorth >= 0 ? 'good' : 'bad' })}
+      ${statCard('Retirement Funded', pct(R.fundedRatio * 100, 0), { small: true, raw: true, valClass: 'val-' + tone(R.fundedRatio) })}
+      ${statCard('Probability of Success', sPct == null ? '…' : sPct + '%', { small: true, raw: true, valClass: t3 ? 'val-' + t3 : '' })}
+      ${statCard('Investable', fmt$(R.investable), { small: true })}
+    </div>
+    ${R.alloc.length ? donut(R.alloc, { size: 160 }) : '<div class="empty">Add accounts to see allocation.</div>'}`,
+    { sub: 'Live' });
+}
+const builders = { intake: buildIntake, profile: buildProfile, needs: buildNeeds, cashflow: buildCashflow, decision: buildDecision, tax: buildTax };
+const liveFns = { intake: liveIntake, dashboard: renderDashboard, profile: liveProfile, needs: liveNeeds, cashflow: liveCashflow, foundational: renderFoundational, decision: liveDecision, tax: liveTax, coplanner: renderCoplanner };
 function showView(v) {
   if (presentMode) return showPresentView(v);
   currentView = v; document.body.dataset.view = v;
@@ -1778,13 +1878,15 @@ function buildReport(opts) {
     const sources = [{ label: 'Social Security / Pension', value: R.guaranteedAtRet, color: 'var(--ink)' }, { label: 'Portfolio withdrawals', value: Math.max(0, R.needAtRet - R.guaranteedAtRet), color: 'var(--gold)' }];
     const mc = getMonteCarlo(), sPct = Math.round(mc.success * 100);
     pages.push(`<div class="report-page">${rpHead('Retirement Outlook')}
-      <div class="rp-grid">${rpStat('Probability of Success', sPct + '%', `${mc.trials} simulations`)}${rpStat('Capital Needed', fmt$(R.capitalNeeded))}${rpStat('Projected at Retirement', fmt$(R.projAtRet))}${rpStat(R.surplus >= 0 ? 'Surplus' : 'Shortfall', fmt$(Math.abs(R.surplus)))}</div>
+      <div class="rp-grid">${rpStat('Probability of Success', sPct + '%', `${mc.trials} simulations`)}${rpStat('Capital Needed', fmt$(R.capitalNeeded), R.alreadyRetired ? 'remaining lifetime' : '')}${rpStat(R.alreadyRetired ? 'Current Portfolio' : 'Projected at Retirement', fmt$(R.projAtRet))}${rpStat(R.surplus >= 0 ? 'Surplus' : 'Shortfall', fmt$(Math.abs(R.surplus)))}</div>
       <div class="rp-chart">${bandChart(mc.ages, mc.p10, mc.p50, mc.p90, { markers: [{ x: R.retAge, label: 'Retire ' + R.retAge }], w: 760, h: 210 })}</div>
       <p class="rp-note">Across ${mc.trials} randomized market simulations, the plan funds the full lifestyle through age ${R.life} in <b>${sPct}%</b> of outcomes. The shaded band shows the 10th–90th percentile range of portfolio values; the line is the median. ${R.depletionAge != null ? `On the deterministic (average-return) path, assets deplete at age <b>${R.depletionAge}</b>.` : `On the deterministic path, the estimated ending balance is <b>${fmt$(R.endingBalance)}</b>.`}</p>
       <div class="rp-section-title">Projected First-Year Retirement Income</div><div class="rp-chart">${donut(sources, { size: 160 })}</div>${rpFoot}</div>`);
   }
   if (opts.cashflow) {
-    const rows = R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge);
+    const rows = CF_GRANULARITY === 'five'
+      ? R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge)
+      : R.rows;
     pages.push(`<div class="report-page">${rpHead('Cash-Flow Projection')}
       <table class="rp-tbl"><thead><tr><th style="text-align:left">Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Expenses</th><th>Save / Draw</th><th>Portfolio</th></tr></thead><tbody>
       ${rows.map(r => { const flow = r.phase === 'work' ? r.contribution : -r.withdrawal; return `<tr><td style="text-align:left">${r.age}</td><td style="text-align:left">${r.phase === 'work' ? 'Working' : 'Retired'}</td><td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.expenses)}</td><td class="amount">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td><td class="amount">${fmtK(r.end)}</td></tr>`; }).join('')}
@@ -1855,10 +1957,12 @@ function handleAction(action, el) {
     case 'add-event': (STATE.events = STATE.events || []).push({ id: uid(), type: el.dataset.type || 'expense', label: '', amount: 25000, atAge: (RESULTS.curAge || 50) + 5, startAge: (RESULTS.curAge || 50) + 5, years: 3 }); rebuildEvents(); recompute(); break;
     case 'del-event': STATE.events.splice(idx, 1); rebuildEvents(); recompute(); break;
     case 'goto': showView(el.dataset.view); break;
+    case 'cf-granularity': CF_GRANULARITY = el.dataset.mode === 'five' ? 'five' : 'all'; liveCashflow(); break;
     case 'open-report': openReport(); break;
     case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0 }; built.decision = false; showView('decision'); break;
     case 'hidesec': STATE.presentation.hidden[el.dataset.key] = el.checked; scheduleSave(); recompute(); break;
     case 'save-baseline': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); recompute(); toast('Baseline saved — make a change to see the impact'); break; }
+    case 'build-plan': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); showView('dashboard'); toast('Plan built — here’s the dashboard'); break; }
     case 'clear-baseline': delete STATE.baseline; scheduleSave(); recompute(); toast('Baseline cleared'); break;
     case 'apply-ss': setPath(STATE, 'income.' + el.dataset.key, +el.dataset.age); recompute(); toast(`Applied claim age ${el.dataset.age}`); break;
     case 'toggle-inputs': STATE.ui = STATE.ui || {}; STATE.ui.collapsed = !STATE.ui.collapsed; document.body.classList.toggle('inputs-collapsed', STATE.ui.collapsed); el.textContent = STATE.ui.collapsed ? '› Show data entry' : '‹ Hide data entry'; scheduleSave(); break;

@@ -227,6 +227,14 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .btn.ghost{background:transparent;border-color:transparent;color:var(--muted)}.btn.ghost:hover{background:var(--ivory-2);color:var(--ink)}
 .btn.sm{padding:.4rem .7rem;font-size:.74rem}
 .btn-row{display:flex;gap:.5rem;flex-wrap:wrap}
+/* segmented control (e.g. cash-flow granularity) */
+.seg{display:inline-flex;border:1px solid var(--line-2);border-radius:8px;overflow:hidden;background:var(--ivory)}
+.seg-btn{padding:.32rem .7rem;font-size:.72rem;font-weight:600;color:var(--muted);border-right:1px solid var(--line-2);transition:.15s}
+.seg-btn:last-child{border-right:none}
+.seg-btn:hover{color:var(--ink);background:var(--ivory-2)}
+.seg-btn.on{background:var(--gold-soft);color:var(--gold-deep)}
+/* New Client Intake: prominent build CTA at the end of the form column */
+.intake-cta{width:100%;justify-content:center;margin-top:.4rem;padding:.85rem 1rem;font-size:.92rem;letter-spacing:.01em}
 
 /* ============================ STAT CARDS ============================ */
 .stat{position:relative;background:var(--paper);border:1px solid var(--line);border-radius:var(--r);padding:1.1rem 1.2rem;box-shadow:var(--shadow-1);overflow:hidden}
