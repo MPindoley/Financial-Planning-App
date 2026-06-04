@@ -832,6 +832,45 @@ function field(f) {
   return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label><div class="${cls}">${pre}${input}${suf}</div></div>`;
 }
 const fieldRow = (...f) => `<div class="field-row${f.length === 3 ? ' three' : ''}">${f.map(field).join('')}</div>`;
+
+/* --------------------- collapsible profile sections ----------------------- */
+const OPEN_SECTIONS = new Set(['household', 'income']);   /* module-level so open state survives the spouse-toggle rebuild */
+function profileSectionStatus(S) {                        /* reuses factFinder's field checks, grouped per section */
+  const c = S.household.client, sp = S.household.spouse, I = S.income, E = S.expenses, SV = S.savings, INS = S.insurance;
+  const pos = v => +v > 0;
+  return {
+    household: (c.name && (!sp.included || sp.name)) ? 'ok' : 'todo',
+    income: (pos(I.clientSalary) || pos(I.otherIncome) || (sp.included && pos(I.spouseSalary))) ? 'ok' : 'todo',
+    expenses: (pos(E.annualExpenses) && (pos(SV.annualSavings) || pos(SV.employerMatch))) ? 'ok' : 'todo',
+    assets: (S.assets && S.assets.length) ? 'ok' : 'todo',
+    insurance: pos(INS.lifeClient) ? 'ok' : 'todo'
+    /* liabilities / assumptions / notes are optional → no status dot */
+  };
+}
+const statusDot = (id, st, cls) => st ? `<span class="${cls} ${st}" data-status-for="${id}" aria-hidden="true">${st === 'ok' ? '✓' : ''}</span>` : '';
+function collapsiblePanel(id, title, body, opts = {}) {
+  const open = OPEN_SECTIONS.has(id);
+  return `<div class="panel accordion ${open ? '' : 'collapsed'} ${opts.cls || ''}" id="sec-${id}" data-section="${id}">
+    <button type="button" class="acc-head" data-action="toggle-section" data-section="${id}" aria-expanded="${open}">
+      ${statusDot(id, opts.status, 'acc-dot')}<h3>${escapeHtml(title)}</h3>
+      <span class="acc-head-right">${opts.sub ? `<span class="ph-sub">${escapeHtml(opts.sub)}</span>` : ''}<svg class="acc-chev" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 9l6 6 6-6"/></svg></span>
+    </button>
+    <div class="acc-body"><div class="panel-body">${body}</div></div>
+  </div>`;
+}
+const PROFILE_INDEX = [['household', 'Household'], ['income', 'Income'], ['expenses', 'Expenses'], ['assets', 'Assets'], ['liabilities', 'Liabilities'], ['insurance', 'Insurance'], ['assumptions', 'Assumptions'], ['notes', 'Notes']];
+function profileIndexNav(status) {
+  return `<nav class="section-index" aria-label="Profile sections"><div class="sx-title">Sections</div>${PROFILE_INDEX.map(([id, label]) =>
+    `<button type="button" class="sx-item ${OPEN_SECTIONS.has(id) ? 'open' : ''}" data-action="goto-section" data-section="${id}">${status[id] ? statusDot(id, status[id], 'sx-dot') : '<span class="sx-dot na" aria-hidden="true"></span>'}<span class="sx-label">${escapeHtml(label)}</span></button>`).join('')}</nav>`;
+}
+function syncProfileStatus() {                            /* live dot refresh without rebuilding the form */
+  const map = profileSectionStatus(STATE);
+  Object.keys(map).forEach(id => $$(`[data-status-for="${id}"]`).forEach(d => {
+    d.classList.toggle('ok', map[id] === 'ok');
+    d.classList.toggle('todo', map[id] === 'todo');
+    d.textContent = map[id] === 'ok' ? '✓' : '';
+  }));
+}
 function toggleField(path, label, rebuild) {
   const on = !!getPath(STATE, path);
   return `<div class="switch-row"><label>${escapeHtml(label)}</label>
@@ -1154,47 +1193,48 @@ function insightHTML(i) {
 /* ----------------------------- PROFILE ------------------------------------ */
 function buildProfile() {
   const spOn = STATE.household.spouse.included;
+  const st = profileSectionStatus(STATE);
   const left =
-    panel('Household', `
+    collapsiblePanel('household', 'Household', `
       ${fieldRow({ path: 'household.client.name', label: 'Client name', type: 'text', ph: 'Full name' }, { path: 'household.client.age', label: 'Age', type: 'age' })}
       ${fieldRow({ path: 'household.client.retireAge', label: 'Retirement age', type: 'age' }, { path: 'household.client.lifeExpectancy', label: 'Life expectancy', type: 'age' })}
       ${toggleField('household.spouse.included', 'Include spouse / partner', true)}
       ${spOn ? `${fieldRow({ path: 'household.spouse.name', label: 'Spouse name', type: 'text' }, { path: 'household.spouse.age', label: 'Age', type: 'age' })}
         ${fieldRow({ path: 'household.spouse.retireAge', label: 'Retirement age', type: 'age' }, { path: 'household.spouse.lifeExpectancy', label: 'Life expectancy', type: 'age' })}` : ''}
-      ${fieldRow({ path: 'household.filing', label: 'Tax filing', type: 'select', options: [{ value: 'married', label: 'Married filing jointly' }, { value: 'single', label: 'Single' }, { value: 'hoh', label: 'Head of household' }] }, { path: 'household.state', label: 'State', type: 'text', ph: 'e.g. NY' })}`) +
-    panel('Income', `
+      ${fieldRow({ path: 'household.filing', label: 'Tax filing', type: 'select', options: [{ value: 'married', label: 'Married filing jointly' }, { value: 'single', label: 'Single' }, { value: 'hoh', label: 'Head of household' }] }, { path: 'household.state', label: 'State', type: 'text', ph: 'e.g. NY' })}`, { status: st.household }) +
+    collapsiblePanel('income', 'Income', `
       ${fieldRow({ path: 'income.clientSalary', label: 'Client salary', type: 'currency' }, spOn ? { path: 'income.spouseSalary', label: 'Spouse salary', type: 'currency' } : { path: 'income.otherIncome', label: 'Other income', type: 'currency' })}
       ${spOn ? fieldRow({ path: 'income.otherIncome', label: 'Other income', type: 'currency' }, { path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' }) : field({ path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' })}
       ${sectionLabel('Guaranteed retirement income (annual, today’s $)')}
       ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', type: 'currency' }, spOn ? { path: 'income.ssSpouse', label: 'Social Security — spouse', type: 'currency' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
       ${fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, spOn ? { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
-      ${spOn ? field({ path: 'income.pension', label: 'Pension', type: 'currency' }) : ''}`) +
-    panel('Expenses & Savings', `
+      ${spOn ? field({ path: 'income.pension', label: 'Pension', type: 'currency' }) : ''}`, { status: st.income }) +
+    collapsiblePanel('expenses', 'Expenses & Savings', `
       ${fieldRow({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' }, { path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today', type: 'percent' })}
       ${fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' })}
       ${sectionLabel('Where new savings go (tax treatment)')}
-      ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k/IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`) +
-    panel('Assets', `<div id="assetsList">${(STATE.assets || []).map(assetRow).join('')}</div>
-      <button class="add-row" data-action="add-asset">＋ Add account</button>`, { sub: 'Investable, education & property' }) +
-    panel('Liabilities', `<div id="liabList">${(STATE.liabilities || []).map(liabRow).join('')}</div>
+      ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k/IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`, { status: st.expenses }) +
+    collapsiblePanel('assets', 'Assets', `<div id="assetsList">${(STATE.assets || []).map(assetRow).join('')}</div>
+      <button class="add-row" data-action="add-asset">＋ Add account</button>`, { status: st.assets, sub: 'Investable, education & property' }) +
+    collapsiblePanel('liabilities', 'Liabilities', `<div id="liabList">${(STATE.liabilities || []).map(liabRow).join('')}</div>
       <button class="add-row" data-action="add-liab">＋ Add liability</button>`) +
-    panel('Insurance & Protection', `
+    collapsiblePanel('insurance', 'Insurance & Protection', `
       ${fieldRow({ path: 'insurance.lifeClient', label: 'Life insurance — client', type: 'currency' }, spOn ? { path: 'insurance.lifeSpouse', label: 'Life insurance — spouse', type: 'currency' } : { path: 'protection.finalExpenses', label: 'Final expenses', type: 'currency' })}
       ${fieldRow({ path: 'protection.replacePct', label: 'Income replacement', type: 'percent' }, { path: 'protection.replaceYears', label: 'Years', type: 'number' })}
       ${spOn ? field({ path: 'protection.finalExpenses', label: 'Final expenses', type: 'currency' }) : ''}
       ${toggleField('protection.includeDebt', 'Cover outstanding debts')}
-      ${toggleField('protection.includeEducation', 'Cover education funding')}`) +
-    panel('Planning Assumptions', `
+      ${toggleField('protection.includeEducation', 'Cover education funding')}`, { status: st.insurance }) +
+    collapsiblePanel('assumptions', 'Planning Assumptions', `
       ${fieldRow({ path: 'assumptions.inflation', label: 'Inflation', type: 'percent' }, { path: 'assumptions.ssCola', label: 'SS / COLA', type: 'percent' })}
       ${fieldRow({ path: 'assumptions.preReturn', label: 'Return — pre-retire', type: 'percent' }, { path: 'assumptions.postReturn', label: 'Return — in retire', type: 'percent' })}
       ${fieldRow({ path: 'assumptions.eduInflation', label: 'Education inflation', type: 'percent' }, { path: 'assumptions.stateTaxRate', label: 'State income tax', type: 'percent' })}
       ${fieldRow({ path: 'assumptions.rmdStartAge', label: 'RMD start age', type: 'age' }, { path: 'assumptions.dividendYield', label: 'Taxable acct yield', hint: 'dividends', type: 'percent' })}`) +
-    panel('Advisor Notes', `<div class="advisor-flag" style="margin-bottom:.5rem">Private — never shown to client</div>
+    collapsiblePanel('notes', 'Advisor Notes', `<div class="advisor-flag" style="margin-bottom:.5rem">Private — never shown to client</div>
       ${field({ path: 'advisorNotes', label: '', type: 'textarea', rows: 6, ph: 'Confidential notes, meeting follow-ups, strategy reminders…' })}`, { cls: 'advisor-only' });
 
   getViewEl('profile').innerHTML = headBlock('Foundation', 'Client Profile',
     'Capture the household’s full financial picture. Everything here powers the plan, charts, and client reports.') +
-    `<div class="profile-layout"><div class="input-cols">${left}</div><aside class="rail"><div id="res-profile"></div></aside></div>`;
+    `<div class="profile-layout"><div class="input-cols">${profileIndexNav(st)}<div class="acc-stack">${left}</div></div><aside class="rail"><div id="res-profile"></div></aside></div>`;
 }
 function factFinder(S) {
   const out = [], add = (status, label, hint) => out.push({ status, label, hint });
@@ -1228,6 +1268,7 @@ function factFinderPanel() {
 }
 function liveProfile() {
   const R = RESULTS;
+  syncProfileStatus();
   const el = $('#res-profile'); if (!el) return;
   el.innerHTML = factFinderPanel() + `<div style="height:1rem"></div>` + panel('Snapshot', `
     <div class="grid cols-2" style="margin-bottom:1rem">
@@ -1821,6 +1862,21 @@ function handleAction(action, el) {
     case 'clear-baseline': delete STATE.baseline; scheduleSave(); recompute(); toast('Baseline cleared'); break;
     case 'apply-ss': setPath(STATE, 'income.' + el.dataset.key, +el.dataset.age); recompute(); toast(`Applied claim age ${el.dataset.age}`); break;
     case 'toggle-inputs': STATE.ui = STATE.ui || {}; STATE.ui.collapsed = !STATE.ui.collapsed; document.body.classList.toggle('inputs-collapsed', STATE.ui.collapsed); el.textContent = STATE.ui.collapsed ? '› Show data entry' : '‹ Hide data entry'; scheduleSave(); break;
+    case 'toggle-section': {
+      const id = el.dataset.section, on = !OPEN_SECTIONS.has(id);
+      on ? OPEN_SECTIONS.add(id) : OPEN_SECTIONS.delete(id);
+      const p = $('#sec-' + id);
+      if (p) { p.classList.toggle('collapsed', !on); const h = p.querySelector('.acc-head'); if (h) h.setAttribute('aria-expanded', String(on)); }
+      const nav = $(`.sx-item[data-section="${id}"]`); if (nav) nav.classList.toggle('open', on);
+      break;
+    }
+    case 'goto-section': {
+      const id = el.dataset.section; OPEN_SECTIONS.add(id);
+      const p = $('#sec-' + id);
+      if (p) { p.classList.remove('collapsed'); const h = p.querySelector('.acc-head'); if (h) h.setAttribute('aria-expanded', 'true'); p.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+      const nav = $(`.sx-item[data-section="${id}"]`); if (nav) nav.classList.add('open');
+      break;
+    }
   }
 }
 
