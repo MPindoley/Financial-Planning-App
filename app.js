@@ -54,6 +54,8 @@ function pvGrowingAnnuity(pmt1, r, g, n) {
   return pmt1 / (r - g) * (1 - pow((1 + g) / (1 + r), n));
 }
 function pmtForFV(target, r, n) { if (n <= 0) return 0; return Math.abs(r) < 1e-9 ? target / n : target * r / (pow(1 + r, n) - 1); }
+/* Immediate-annuity payout rate by purchase age (single-life, level) — used by the "buy income annuity" technique. */
+const annuityRate = a => clamp(0.05 + Math.max(0, (+a || 0) - 60) * 0.0025, 0.045, 0.09);
 
 /* ----------------------------- default state ------------------------------ */
 function defaultState() {
@@ -78,6 +80,9 @@ function defaultState() {
     goals: [{ id: uid(), name: 'Retirement', type: 'retirement', priority: 'High' }],
     events: [],
     rothStrategy: { on: false, mode: 'fill', toRate: 0.24, amount: 50000, startAge: 65, endAge: 72 },
+    debtStrategy: { on: false, method: 'avalanche', extra: 0 },
+    pensionElection: { survivorPct: 0 },
+    charitableStrategy: { on: false, qcd: 0 },
     advisorNotes: '',
     estate: { legacyTarget: 0, annualGifting: 0, charitableGoal: 0, hasWill: false, hasTrust: false, hasPOA: false, hasHealthDirective: false, beneficiariesConfirmed: false, estateNote: '' },
     ui: { collapsed: false }
@@ -293,6 +298,15 @@ function simulate(S, opts = {}) {
   let debts = (S.liabilities || []).map(l => ({ type: l.type, bal: +l.balance || 0, rate: (+l.rate || 0) / 100, pay: (+l.payment || 0) * 12 }));
   const baseExp = +E.annualExpenses || 0, retPct = (+E.retirementExpensePct || 100) / 100;
   const events = S.events || [];
+  const ds = S.debtStrategy || {};                                   // debt-payoff accelerator (off by default)
+  const INS = S.insurance || {};
+  const survivor = (S.survivor && S.survivor.on) ? S.survivor : null; // death-of-spouse what-if (Decision Center only)
+  const survExpFactor = survivor ? (survivor.expenseFactor != null ? +survivor.expenseFactor : 0.75) : 1;
+  const disability = (S.disability && S.disability.on) ? S.disability : null;   // disability what-if (Decision Center only)
+  const disPct = disability ? (disability.benefitPct != null ? +disability.benefitPct : 60) / 100 : 0;
+  const pe = S.pensionElection || {};                                // pension survivor-benefit election (joint-and-survivor)
+  const pensSurvPct = (+pe.survivorPct || 0) / 100, pensReduction = 1 - 0.15 * pensSurvPct;
+  const cs = S.charitableStrategy || {};                             // charitable QCD strategy (off by default)
 
   const rows = []; let depletionAge = null, lifetimeTax = 0, lifetimeFedTax = 0, lifetimeStateTax = 0;
 
@@ -300,7 +314,23 @@ function simulate(S, opts = {}) {
     const t = age - curAge, year = curYear + t;
     const inflFac = pow(1 + infl, Math.max(0, year - TAX.baseYear)), g = pow(1 + infl, t);
     const spNow = spAge0 + t;
-    const clientWorking = age < clientRet, spouseWorking = spOn && spNow < spRet, anyWorking = clientWorking || spouseWorking;
+    let deadClient = false, deadSpouse = false, deathBenefit = 0, filingY = filing, expFac = 1;
+    if (survivor) {
+      const isClient = survivor.who === 'client', dA = +survivor.atAge || 0;
+      const gone = isClient ? (age >= dA) : (spOn && spNow >= dA);
+      if (gone) {
+        if (isClient) deadClient = true; else deadSpouse = true;
+        filingY = 'single'; expFac = survExpFactor;
+        if ((isClient && age === dA) || (!isClient && spNow === dA)) deathBenefit = isClient ? (+INS.lifeClient || 0) : (+INS.lifeSpouse || 0);
+      }
+    }
+    let disClient = false, disSpouse = false;
+    if (disability) {
+      const isC = disability.who === 'client', dA2 = +disability.atAge || 0;
+      if (isC) disClient = age >= dA2 && age < clientRet && !deadClient;
+      else disSpouse = spOn && spNow >= dA2 && spNow < spRet && !deadSpouse;
+    }
+    const clientWorking = age < clientRet && !deadClient && !disClient, spouseWorking = spOn && spNow < spRet && !deadSpouse && !disSpouse, anyWorking = clientWorking || spouseWorking;
     const retired = age >= clientRet;
     const growRate = opts.sampleReturn ? opts.sampleReturn(retired) : (retired ? post : pre);
 
@@ -308,7 +338,10 @@ function simulate(S, opts = {}) {
     events.forEach(ev => {
       if (ev.type === 'downturn' && age === (+ev.atAge || 0)) { const k = 1 - (+ev.amount || 0) / 100; bTax *= k; bDef *= k; bRoth *= k; basis *= k; }
       if (ev.type === 'mortgagePayoff' && age === (+ev.atAge || 0)) { debts.forEach(d => { if (d.type === 'mortgage' && d.bal > 0) { bTax -= d.bal; d.bal = 0; } }); }
+      if (ev.type === 'sellAsset' && age === (+ev.atAge || 0)) { const pr = (+ev.amount || 0) * g; bTax += pr; basis += pr; }   // proceeds into taxable
+      if (ev.type === 'annuity' && age === (+ev.atAge || 0)) { let prem = (+ev.amount || 0) * g; const tT = Math.min(bTax, prem); bTax -= tT; prem -= tT; const tD = Math.min(bDef, prem); bDef -= tD; prem -= tD; bRoth -= Math.min(bRoth, prem); if (basis > bTax) basis = bTax; }   // premium out of portfolio
     });
+    if (deathBenefit > 0) { bTax += deathBenefit; basis += deathBenefit; }   // life-insurance payout to the survivor
 
     /* income */
     let wages = 0;
@@ -316,9 +349,14 @@ function simulate(S, opts = {}) {
     if (spouseWorking) wages += (+I.spouseSalary || 0) * pow(1 + salg, t);
     const otherInc = anyWorking ? (+I.otherIncome || 0) * g : 0;
     let ss = 0;
-    if (age >= ssClaimC) ss += (+I.ssClient || 0) * pow(1 + cola, t);
-    if (spOn && spNow >= ssClaimS) ss += (+I.ssSpouse || 0) * pow(1 + cola, t);
-    const pension = retired ? (+I.pension || 0) * g : 0;
+    const ssC = (age >= ssClaimC) ? (+I.ssClient || 0) * pow(1 + cola, t) : 0;
+    const ssS = (spOn && spNow >= ssClaimS) ? (+I.ssSpouse || 0) * pow(1 + cola, t) : 0;
+    ss = (deadClient || deadSpouse) ? Math.max(ssC, ssS) : ssC + ssS;   // survivor keeps the larger benefit
+    let pension = retired ? (+I.pension || 0) * g * pensReduction : 0;   // pension election reduces the lifetime benefit
+    if (pension > 0 && (deadClient || deadSpouse)) pension *= pensSurvPct; // survivor continuation per the election
+    let disabilityInc = 0;                                              // disability income replacement (% of salary, pre-retirement)
+    if (disClient) disabilityInc += (+I.clientSalary || 0) * pow(1 + salg, t) * disPct;
+    if (disSpouse) disabilityInc += (+I.spouseSalary || 0) * pow(1 + salg, t) * disPct;
     const qualDiv = bTax * divYield;
 
     /* contributions */
@@ -333,41 +371,54 @@ function simulate(S, opts = {}) {
 
     /* spending need */
     const ev = applyEventsYear(events, age, t, infl);
-    const expenses = baseExp * (retired ? retPct : 1) * g;
+    const expenses = baseExp * (retired ? retPct : 1) * g * expFac;
     let debtPay = 0;
     debts.forEach(d => { if (d.bal > 0.01) { const interest = d.bal * d.rate; const pay = Math.min(Math.max(d.pay, interest), d.bal + interest); d.bal = Math.max(0, d.bal - (pay - interest)); debtPay += pay; } });
-    const need = expenses + debtPay + ev.out;
+    if (ds.on && (+ds.extra || 0) > 0) {                              // accelerator: extra payment, snowball/avalanche order
+      let extra = (+ds.extra || 0) * 12 * g;
+      const active = debts.filter(d => d.bal > 0.01).sort((x, y) => ds.method === 'snowball' ? x.bal - y.bal : y.rate - x.rate);
+      for (const d of active) { if (extra <= 0.01) break; const ap = Math.min(extra, d.bal); d.bal -= ap; debtPay += ap; extra -= ap; }
+    }
+    let annuityInc = 0, expenseCut = 0;                               // annuity income stream + downsize expense reduction
+    events.forEach(e => {
+      const a0 = +e.atAge || 0;
+      if (e.type === 'annuity' && age >= a0) annuityInc += (+e.amount || 0) * pow(1 + infl, Math.max(0, a0 - curAge)) * annuityRate(a0);
+      if (e.type === 'sellAsset' && age >= a0) expenseCut += (+e.cut || 0) * g;
+    });
+    const need = Math.max(0, expenses - expenseCut) + debtPay + ev.out;
 
     let rmd = (age >= rmdAge && bDef > 0) ? bDef / rmdDivisor(age) : 0;
-    let conversion = rothConversionYear(S, { age, bDef, filing, inflFac, pension, ss, rmd });
+    const qcdAmt = (cs.on && retired && age >= rmdAge && bDef > 0) ? Math.min((+cs.qcd || 0) * g, rmd, bDef) : 0;   // QCD satisfies RMD tax-free
+    const rmdHH = rmd - qcdAmt;                                          // household portion of the RMD (after charitable QCD)
+    let conversion = rothConversionYear(S, { age, bDef, filing: filingY, inflFac, pension, ss, rmd: rmdHH });
 
     const row = { age, t, year, phase: anyWorking ? 'work' : 'retire', wages, ss, pension, rmd, conversion, expenses, need };
     let taxes, wT = 0, wD = 0, wR = 0, gain = 0;
 
     if (anyWorking) {
-      taxes = computeTax({ wages, pretax: cPretax, pension, taxableInterest: 0, qualDiv, ss, filing, stateRate, inflFac, isWorking: true });
+      taxes = computeTax({ wages, pretax: cPretax, pension, taxableInterest: 0, qualDiv, ss, filing: filingY, stateRate, inflFac, isWorking: true });
       bDef += cPretax + match; bRoth += cRoth; bTax += cTaxable + qualDiv; basis += cTaxable + qualDiv;
       if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
-      const netCash = wages + otherInc + ss + pension + ev.in - taxes.total - need - cPretax - cRoth - cTaxable;
+      const netCash = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc - taxes.total - need - cPretax - cRoth - cTaxable;
       if (netCash >= 0) { bTax += netCash; basis += netCash; }
       else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
     } else {
       bDef -= rmd;
       if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
-      const guaranteed = ss + pension + ev.in;
-      let W = Math.max(0, need - guaranteed - rmd), seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis);
+      const guaranteed = ss + pension + ev.in + annuityInc + disabilityInc;
+      let W = Math.max(0, need - guaranteed - rmdHH), seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis);
       for (let i = 0; i < 8; i++) {
-        const tx = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmd + conversion, ss, ltcgRealized: seq.gain, filing, stateRate, inflFac, isWorking: false });
-        const newW = Math.max(0, need - guaranteed - rmd + tx.total);
+        const tx = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false });
+        const newW = Math.max(0, need - guaranteed - rmdHH + tx.total);
         seq = sequenceWithdrawals(newW, bTax, bDef, bRoth, basis);
         if (Math.abs(newW - W) < 25) { W = newW; break; } W = newW;
       }
-      taxes = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmd + conversion, ss, ltcgRealized: seq.gain, filing, stateRate, inflFac, isWorking: false });
+      taxes = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false });
       const before = bTax; bTax -= seq.wTax; if (before > 0) basis *= bTax / before; bDef -= seq.wDef; bRoth -= seq.wRoth;
-      wT = seq.wTax + 0; wD = seq.wDef + rmd; wR = seq.wRoth; gain = seq.gain;
+      wT = seq.wTax + 0; wD = seq.wDef + rmdHH; wR = seq.wRoth; gain = seq.gain;
       bTax += qualDiv; basis += qualDiv;
-      const surplus = guaranteed + rmd - need - taxes.total;
+      const surplus = guaranteed + rmdHH - need - taxes.total;
       if (surplus > 0) { bTax += surplus; basis += surplus; }
       if (seq.shortfall > 1 && depletionAge === null) depletionAge = age;
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
@@ -382,7 +433,7 @@ function simulate(S, opts = {}) {
       taxableIncome: taxes.taxableIncome, ordinaryTaxable: taxes.ordinaryTaxable, marginal: taxes.marginal, ssTaxable: taxes.ssTaxable,
       contribution: retired ? 0 : (cPretax + cRoth + cTaxable + match), withdrawal: retired ? (wT + wD + wR) : (wT + wD + wR),
       wTax: wT, wDef: wD, wRoth: wR, bTax, bDef, bRoth, end: portfolio, debt: totalDebt,
-      reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + ss + pension,
+      reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + ss + pension + annuityInc + disabilityInc, annuity: annuityInc, disabilityInc, qcd: qcdAmt,
       cumTax: lifetimeTax
     });
     rows.push(row);
@@ -427,7 +478,7 @@ function monteCarlo(S, trials) {
     endP10: q(0.10), endP50: q(0.50), endP90: q(0.90) };
 }
 function mcSignature(S) {
-  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.rothStrategy]);
+  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.rothStrategy, S.debtStrategy, S.survivor, S.disability, S.pensionElection, S.charitableStrategy]);
 }
 const MC_MULTI = new Map();
 function mcFor(S, trials) {
@@ -471,11 +522,21 @@ function ssOptimize(pia, currentAge, lifeExp, cola) {
 
 /* ----------------------------- compute engine ----------------------------- */
 function computeGoal(g, ctx) {
-  const { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife } = ctx;
+  const { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife, endingBalance = 0, estate = {}, curAge = 0 } = ctx;
   const years = +g.years || 0;
   let target, projected, reqMonthly = 0;
   if (g.type === 'retirement') { target = capitalNeeded; projected = projAtRet; }
   else if (g.type === 'protection') { target = totalProtNeed; projected = existingLife; }
+  else if (g.type === 'legacy') { target = (+g.amount || +estate.legacyTarget || 0); projected = endingBalance; }   // funded by the projected estate
+  else if (g.type === 'custom') {                                            // fully custom: amount, start/end age, frequency, own inflation
+    const gi = (g.inflation != null && g.inflation !== '' ? +g.inflation : infl * 100) / 100;
+    const sA = +g.startAge || curAge, eA = Math.max(sA, +g.endAge || sA), freq = g.frequency || 'once';
+    const yTo = Math.max(0, sA - curAge);
+    if (freq === 'once') target = (+g.amount || 0) * pow(1 + gi, yTo);
+    else { const per = (+g.amount || 0) * (freq === 'monthly' ? 12 : 1); let s = 0; for (let a = sA; a <= eA; a++) s += per * pow(1 + gi, Math.max(0, a - curAge)); target = s; }
+    projected = fv(+g.funded || 0, pre, yTo) + fvAnnuity((+g.monthly || 0) * 12, pre, yTo);
+    reqMonthly = pmtForFV(Math.max(0, target - fv(+g.funded || 0, pre, yTo)), pre, yTo) / 12;
+  }
   else if (g.type === 'education') {
     const dur = Math.max(1, +g.duration || 1), cost = +g.amount || 0;
     let fc = 0; for (let k = 0; k < dur; k++) fc += cost * pow(1 + eduI, years + k);
@@ -569,7 +630,11 @@ function compute(S) {
   const protGap = Math.max(0, totalProtNeed - existingLife - investable);
 
   /* goals */
-  const goals = (S.goals || []).map(g => computeGoal(g, { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife }));
+  const estate = S.estate || {};
+  const goalCtx = { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife, endingBalance, estate, curAge };
+  const goals = (S.goals || []).map(g => computeGoal(g, goalCtx));
+  if ((+estate.legacyTarget || 0) > 0 && !goals.some(g => g.type === 'legacy'))   // estate legacy target funds a real goal vs projected estate
+    goals.push(computeGoal({ id: 'estate-legacy', name: 'Legacy / Estate', type: 'legacy', priority: 'Legacy' }, goalCtx));
 
   /* allocation */
   const alloc = [
@@ -913,14 +978,28 @@ function liabRow(l, i) {
       <div class="rr-cell"><label>Monthly payment</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="payment" data-money value="${moneyDisplay(l.payment || 0)}"></div></div>
     </div></div>`;
 }
+const GOAL_TYPES = [['retirement', 'Retirement'], ['education', 'Education / college'], ['purchase', 'Major purchase'], ['travel', 'Travel / lifestyle'], ['gifting', 'Gifting'], ['charitable', 'Charitable giving'], ['debt', 'Debt payoff'], ['emergency', 'Emergency reserve'], ['protection', 'Survivor / income-replacement'], ['ltc', 'Long-term care'], ['legacy', 'Legacy / estate'], ['custom', 'Custom']];
 function goalRow(g, i) {
   const isMgmt = g.type === 'retirement' || g.type === 'protection';
+  const isLegacy = g.type === 'legacy';
+  const isCustom = g.type === 'custom';
   return `<div class="repeat-row" style="grid-template-columns:1fr 130px 26px">
       <input type="text" data-arr="goals" data-idx="${i}" data-key="name" value="${escapeAttr(g.name)}" placeholder="Goal name">
       <select data-arr="goals" data-idx="${i}" data-key="type">
-        ${['retirement', 'education', 'purchase', 'protection', 'custom'].map(t => `<option value="${t}" ${t === g.type ? 'selected' : ''}>${t[0].toUpperCase() + t.slice(1)}</option>`).join('')}</select>
+        ${GOAL_TYPES.map(([v, l]) => `<option value="${v}" ${v === g.type ? 'selected' : ''}>${l}</option>`).join('')}</select>
       <button class="rr-del" data-action="del-goal" data-idx="${i}" title="Remove">×</button>
     ${isMgmt ? `<div style="grid-column:1/-1;font-size:.72rem;color:var(--faint);margin-top:.1rem">Calculated from the Retirement & Protection inputs.</div>` :
+      isLegacy ? `<div style="grid-column:1/-1;display:grid;grid-template-columns:1fr;gap:.4rem;margin-top:.3rem">
+        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="Legacy target (today's $)"></div>
+        <div style="font-size:.72rem;color:var(--faint)">Measured against your projected estate (ending portfolio).</div></div>` :
+      isCustom ? `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-top:.3rem">
+        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="Amount per occurrence (today's $)"></div>
+        <select data-arr="goals" data-idx="${i}" data-key="frequency" data-vtype="text" title="Frequency"><option value="once" ${(g.frequency || 'once') === 'once' ? 'selected' : ''}>One-time</option><option value="annual" ${g.frequency === 'annual' ? 'selected' : ''}>Annual</option><option value="monthly" ${g.frequency === 'monthly' ? 'selected' : ''}>Monthly</option></select>
+        <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="startAge" value="${g.startAge || 0}" title="Start age" placeholder="Start">
+        <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="endAge" value="${g.endAge || 0}" title="End age (for recurring)" placeholder="End">
+        <div class="control has-suffix"><input type="number" min="0" step="0.1" data-arr="goals" data-idx="${i}" data-key="inflation" data-vtype="percent" value="${g.inflation != null ? g.inflation : ''}" title="Goal inflation (blank = plan default)" placeholder="Infl"><span class="suffix">%</span></div>
+        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="funded" data-money value="${moneyDisplay(g.funded || 0)}" title="Already saved"></div>
+        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="monthly" data-money value="${moneyDisplay(g.monthly || 0)}" title="Monthly savings"></div></div>` :
       `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-top:.3rem">
         <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="${g.type === 'education' ? 'Annual cost (today)' : 'Goal amount (today)'}"></div>
         <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="years" value="${g.years || 0}" title="Years until" placeholder="Yrs">
@@ -930,11 +1009,12 @@ function goalRow(g, i) {
       </div>`}</div>`;
 }
 
-const EVENT_TYPES = [['child', 'Child / dependent'], ['college', 'College funding'], ['expenseRecurring', 'Recurring expense'], ['income', 'Extra income'], ['expense', 'One-time expense'], ['windfall', 'Windfall / inheritance'], ['ltc', 'Long-term care'], ['downturn', 'Market downturn'], ['mortgagePayoff', 'Pay off mortgage']];
+const EVENT_TYPES = [['child', 'Child / dependent'], ['college', 'College funding'], ['expenseRecurring', 'Recurring expense'], ['income', 'Extra income'], ['expense', 'One-time expense'], ['windfall', 'Windfall / inheritance'], ['ltc', 'Long-term care'], ['downturn', 'Market downturn'], ['mortgagePayoff', 'Pay off mortgage'], ['sellAsset', 'Sell asset / downsize'], ['annuity', 'Buy income annuity']];
 function eventRow(ev, i) {
   const recurring = ['child', 'college', 'ltc', 'income', 'expenseRecurring'].includes(ev.type);
   const oneTime = ['expense', 'windfall'].includes(ev.type);
   const isDown = ev.type === 'downturn', isPayoff = ev.type === 'mortgagePayoff';
+  const isSell = ev.type === 'sellAsset', isAnnuity = ev.type === 'annuity';
   let fields;
   if (recurring) fields = `
     <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="startAge" value="${ev.startAge || 0}" title="Begins at client age" placeholder="Age">
@@ -946,6 +1026,13 @@ function eventRow(ev, i) {
   else if (isDown) fields = `
     <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
     <div class="control has-suffix" style="grid-column:span 2"><input type="number" min="0" max="90" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="percent" value="${ev.amount || 0}" title="One-year portfolio decline"><span class="suffix">% drop</span></div>`;
+  else if (isSell) fields = `
+    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
+    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Net proceeds into the portfolio"></div>
+    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="cut" data-money value="${moneyDisplay(ev.cut || 0)}" title="Ongoing spending reduction (downsizing)"></div>`;
+  else if (isAnnuity) fields = `
+    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
+    <div class="control has-prefix" style="grid-column:span 2"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Premium → guaranteed lifetime income"></div>`;
   else fields = `<input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age"><div style="grid-column:span 2;font-size:.72rem;color:var(--faint);align-self:center">Remaining mortgage paid from savings</div>`;
   return `<div class="repeat-row" style="grid-template-columns:1fr 26px">
     <input type="text" data-arr="events" data-idx="${i}" data-key="label" value="${escapeAttr(ev.label || '')}" placeholder="Event name">
@@ -1027,7 +1114,7 @@ function headBlock(eyebrow, title, sub, extra = '') {
 }
 function ensureDefaults(S) {
   const d = defaultState();
-  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
+  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'debtStrategy', 'pensionElection', 'charitableStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
   S.household = S.household || d.household;
   S.household.client = Object.assign({}, d.household.client, S.household.client);
   S.household.spouse = Object.assign({}, d.household.spouse, S.household.spouse);
@@ -1454,12 +1541,13 @@ function renderFoundational() {
 }
 
 /* ----------------------------- DECISION CENTER ---------------------------- */
-let SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0 };
+let SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0, insuranceMult: 1, ltcCoverage: 0 };
 function fmtScn(key, v) {
-  if (key === 'savingsMult') return (+v).toFixed(2) + '×';
+  if (key === 'savingsMult' || key === 'insuranceMult') return (+v).toFixed(2) + '×';
   if (key === 'returnDelta') return (v > 0 ? '+' : '') + (+v).toFixed(1) + '%';
   if (key === 'retireDelta') return (v > 0 ? '+' : '') + v + ' yrs';
   if (key === 'spendDelta') return (v > 0 ? '+' : '') + v + ' pts';
+  if (key === 'ltcCoverage') return v + '% covered';
   return (v > 0 ? '+' : '') + v + '%';
 }
 function slider(key, label, min, max, step) {
@@ -1476,7 +1564,72 @@ function applyScenario(base) {
   s.expenses.retirementExpensePct = (+s.expenses.retirementExpensePct || 0) + SCENARIO.spendDelta;
   s.income.ssClient = (+s.income.ssClient || 0) * (1 + SCENARIO.ssDelta / 100);
   s.income.ssSpouse = (+s.income.ssSpouse || 0) * (1 + SCENARIO.ssDelta / 100);
+  s.insurance.lifeClient = (+s.insurance.lifeClient || 0) * SCENARIO.insuranceMult;   // add / reduce life insurance
+  s.insurance.lifeSpouse = (+s.insurance.lifeSpouse || 0) * SCENARIO.insuranceMult;
+  if (SCENARIO.ltcCoverage > 0) (s.events || []).forEach(e => { if (e.type === 'ltc') e.amount = (+e.amount || 0) * (1 - SCENARIO.ltcCoverage / 100); });   // add LTC coverage
   return s;
+}
+let SURVIVOR = { on: false, who: 'spouse', atAge: 0 };   /* ephemeral Decision-Center survivor what-if */
+function debtReadout() {
+  const R = RESULTS, ds = STATE.debtStrategy || {};
+  const totalDebtNow = (STATE.liabilities || []).reduce((s, l) => s + (+l.balance || 0), 0);
+  if (totalDebtNow <= 0) return '<p class="i-action" style="margin-top:.5rem;color:var(--muted)">No liabilities entered — add debts on the Client Profile to model payoff.</p>';
+  const freeRow = R.rows.find(r => r.debt <= 1), freeAge = freeRow ? freeRow.age : null;
+  let html = `<p class="i-action" style="margin-top:.5rem">Total debt today <b>${fmt$(totalDebtNow)}</b> · ${freeAge ? `debt-free at <b>age ${freeAge}</b>` : 'not fully repaid within the plan'}.</p>`;
+  if (ds.on && (+ds.extra || 0) > 0) {
+    const off = compute(Object.assign({}, STATE, { debtStrategy: Object.assign({}, ds, { on: false }) }));
+    const offFree = (off.rows.find(r => r.debt <= 1) || {}).age, dEnd = R.endingBalance - off.endingBalance;
+    if (offFree && freeAge && offFree > freeAge) html += `<p class="i-action">→ Debt-free <b>${offFree - freeAge} yr${offFree - freeAge > 1 ? 's' : ''} sooner</b> than minimum payments; ending portfolio <b>${dEnd >= 0 ? '+' : '−'}${fmt$(Math.abs(dEnd))}</b>.</p>`;
+    else html += `<p class="i-action">→ Accelerator active — extra payments applied in ${ds.method === 'snowball' ? 'snowball' : 'avalanche'} order.</p>`;
+  }
+  return html;
+}
+function survivorControls() {
+  if (!STATE.household.spouse.included) return '';
+  const c = STATE.household.client, sp = STATE.household.spouse;
+  if (!SURVIVOR.atAge) SURVIVOR.atAge = (SURVIVOR.who === 'client' ? (+c.age || 55) : (+sp.age || 55)) + 15;
+  return `<div class="switch-row"><label>Model an early death</label>
+      <button class="switch" role="switch" aria-checked="${SURVIVOR.on}" data-surv-toggle></button></div>
+    <div class="field-row">
+      <div class="field"><label>Who passes</label><select data-surv="who" data-vtype="text"><option value="spouse" ${SURVIVOR.who === 'spouse' ? 'selected' : ''}>Spouse</option><option value="client" ${SURVIVOR.who === 'client' ? 'selected' : ''}>Client</option></select></div>
+      <div class="field"><label>At age</label><input type="number" min="0" data-surv="atAge" value="${+SURVIVOR.atAge || 0}"></div>
+    </div>`;
+}
+function survivorReadout() {
+  if (!STATE.household.spouse.included) return '<p class="view-sub" style="margin:.4rem 0 0">Include a spouse/partner on the Client Profile to model a survivor scenario.</p>';
+  if (!SURVIVOR.on) return '<p class="view-sub" style="margin:.4rem 0 0">Toggle on to model an early death — the survivor keeps the larger Social Security benefit, files as single, expenses adjust, and any life insurance pays out.</p>';
+  const base = RESULTS, sv = compute(Object.assign({}, STATE, { survivor: { on: true, who: SURVIVOR.who, atAge: +SURVIVOR.atAge || 0 } }));
+  const lastsB = base.depletionAge != null ? base.depletionAge : base.life + 1, lastsS = sv.depletionAge != null ? sv.depletionAge : sv.life + 1;
+  const ageFmt = v => v > base.life ? `${base.life}+` : `age ${Math.round(v)}`;
+  return `<table class="tbl" style="margin-top:.6rem"><thead><tr><th style="text-align:left">Metric</th><th>Current</th><th>Survivor</th><th>Change</th></tr></thead><tbody>
+      ${cmpRow('Portfolio lasts to', lastsB, lastsS, ageFmt)}
+      ${cmpRow('Ending balance (age ' + base.life + ')', base.endingBalance, sv.endingBalance, fmt$)}
+      ${cmpRow('Lifetime taxes', base.lifetimeTax, sv.lifetimeTax, fmt$, false)}
+    </tbody></table>
+    <p class="rp-disclaimer" style="margin-top:.4rem">Assumes the ${SURVIVOR.who === 'client' ? 'client' : 'spouse'} passes at age ${+SURVIVOR.atAge || 0}: survivor spending set to ~75% of current, the larger Social Security benefit continues, filing becomes single, and entered life insurance is paid to the survivor.</p>`;
+}
+let DISABILITY = { on: false, who: 'client', atAge: 0, benefitPct: 60 };   /* ephemeral Decision-Center disability what-if */
+function disabilityControls() {
+  const c = STATE.household.client, sp = STATE.household.spouse;
+  if (!DISABILITY.atAge) DISABILITY.atAge = (DISABILITY.who === 'spouse' ? (+sp.age || 45) : (+c.age || 45)) + 5;
+  return `<div class="switch-row"><label>Model a disability</label>
+      <button class="switch" role="switch" aria-checked="${DISABILITY.on}" data-dis-toggle></button></div>
+    <div class="field-row three">
+      <div class="field"><label>Who</label><select data-dis="who" data-vtype="text"><option value="client" ${DISABILITY.who === 'client' ? 'selected' : ''}>Client</option>${sp.included ? `<option value="spouse" ${DISABILITY.who === 'spouse' ? 'selected' : ''}>Spouse</option>` : ''}</select></div>
+      <div class="field"><label>At age</label><input type="number" min="0" data-dis="atAge" value="${+DISABILITY.atAge || 0}"></div>
+      <div class="field"><label>Income replaced</label><div class="control has-suffix"><input type="number" min="0" max="100" data-dis="benefitPct" value="${+DISABILITY.benefitPct || 0}"><span class="suffix">%</span></div></div>
+    </div>`;
+}
+function disabilityReadout() {
+  if (!DISABILITY.on) return '<p class="view-sub" style="margin:.4rem 0 0">Toggle on to model a disability before retirement — earned income stops and is replaced at the chosen level until retirement age.</p>';
+  const base = RESULTS, dv = compute(Object.assign({}, STATE, { disability: { on: true, who: DISABILITY.who, atAge: +DISABILITY.atAge || 0, benefitPct: +DISABILITY.benefitPct || 0 } }));
+  const lastsB = base.depletionAge != null ? base.depletionAge : base.life + 1, lastsD = dv.depletionAge != null ? dv.depletionAge : dv.life + 1;
+  const ageFmt = v => v > base.life ? `${base.life}+` : `age ${Math.round(v)}`;
+  return `<table class="tbl" style="margin-top:.6rem"><thead><tr><th style="text-align:left">Metric</th><th>Current</th><th>Disability</th><th>Change</th></tr></thead><tbody>
+      ${cmpRow('Portfolio lasts to', lastsB, lastsD, ageFmt)}
+      ${cmpRow('Ending balance (age ' + base.life + ')', base.endingBalance, dv.endingBalance, fmt$)}
+    </tbody></table>
+    <p class="rp-disclaimer" style="margin-top:.4rem">Assumes the ${DISABILITY.who} is disabled at age ${+DISABILITY.atAge || 0}: earned income stops and ${+DISABILITY.benefitPct || 0}% of salary is replaced (disability insurance) until retirement age.</p>`;
 }
 function buildDecision() {
   const addBtns = `<div class="btn-row" style="margin-top:.6rem">
@@ -1487,7 +1640,9 @@ function buildDecision() {
     <button class="btn sm" data-action="add-event" data-type="income">＋ Extra income</button>
     <button class="btn sm" data-action="add-event" data-type="ltc">＋ Long-term care</button>
     <button class="btn sm" data-action="add-event" data-type="downturn">＋ Market downturn</button>
-    <button class="btn sm" data-action="add-event" data-type="mortgagePayoff">＋ Pay off mortgage</button></div>`;
+    <button class="btn sm" data-action="add-event" data-type="mortgagePayoff">＋ Pay off mortgage</button>
+    <button class="btn sm" data-action="add-event" data-type="sellAsset">＋ Sell / downsize</button>
+    <button class="btn sm" data-action="add-event" data-type="annuity">＋ Income annuity</button></div>`;
   getViewEl('decision').innerHTML = headBlock('Advanced', 'Decision Center',
     'Model life events and what-ifs live with your client. Add an event or move a lever and watch the plan respond — built for interactive, collaborative conversations.') +
     `<div class="panel pad" style="margin-bottom:1.1rem">
@@ -1500,7 +1655,24 @@ function buildDecision() {
         ${slider('returnDelta', 'Investment return', -2, 2, 0.1)}
         ${slider('spendDelta', 'Retirement spending', -20, 20, 1)}
         ${slider('ssDelta', 'Social Security benefit', -30, 30, 5)}
+        ${slider('insuranceMult', 'Life insurance', 0, 3, 0.25)}
+        ${slider('ltcCoverage', 'LTC coverage', 0, 100, 10)}
       </div></div>
+    ${panel('Techniques', `
+      <div class="section-label" style="margin-top:0">Debt payoff — accelerate or refinance</div>
+      ${toggleField('debtStrategy.on', 'Redirect extra cash to debt')}
+      ${fieldRow({ path: 'debtStrategy.extra', label: 'Extra payment', type: 'currency', suffix: '/mo' }, { path: 'debtStrategy.method', label: 'Payoff order', type: 'select', options: [{ value: 'avalanche', label: 'Avalanche — highest rate first' }, { value: 'snowball', label: 'Snowball — smallest balance first' }] })}
+      <div id="res-debt"></div>
+      <div class="section-label">Charitable — qualified charitable distribution</div>
+      ${toggleField('charitableStrategy.on', 'Give RMDs directly to charity (QCD, tax-free)')}
+      ${fieldRow({ path: 'charitableStrategy.qcd', label: 'Annual QCD', type: 'currency', suffix: '/yr' }, { path: 'pensionElection.survivorPct', label: 'Pension election', type: 'select', options: [{ value: '0', label: 'Single life — highest payment' }, { value: '50', label: '50% joint & survivor' }, { value: '75', label: '75% joint & survivor' }, { value: '100', label: '100% joint & survivor' }] })}
+      <div class="section-label">Survivor — death of a spouse</div>
+      ${survivorControls() || '<p class="view-sub" style="margin:.2rem 0 0">Include a spouse on the Client Profile to model this.</p>'}
+      <div id="res-survivor"></div>
+      <div class="section-label">Disability — loss of earned income</div>
+      ${disabilityControls()}
+      <div id="res-disability"></div>`, { sub: 'Strategy levers', hideKey: 'dec-tech', cls: 'advisor-only' })}
+    <div style="height:1.1rem"></div>
     <div id="res-decision"></div>
     <div style="height:1.1rem"></div>
     <div class="advisor-only">${panel('Life Events', `<p class="view-sub" style="margin-top:0;margin-bottom:.6rem">Events are built into the plan and flow through every projection, chart, and the cash-flow timeline.</p>
@@ -1533,6 +1705,9 @@ function liveDecision() {
         ${cmpRow('Annual savings', base.annualSavings, alt.annualSavings, fmt$)}
       </tbody></table>`, { sub: 'Live what-if' })
     + `<div style="height:1.1rem"></div>` + ssOptimizerPanel();
+  const dEl = $('#res-debt'); if (dEl) dEl.innerHTML = debtReadout();
+  const sEl = $('#res-survivor'); if (sEl) sEl.innerHTML = survivorReadout();
+  const xEl = $('#res-disability'); if (xEl) xEl.innerHTML = disabilityReadout();
 }
 function ssOptimizerBlock(name, key, pia, curAge, life, claimNow, cola) {
   if (!(pia > 0)) return '';
@@ -1931,10 +2106,10 @@ function doPrint() {
 }
 
 /* ----------------------------- list rebuilds ------------------------------ */
-const rebuildAssets = () => { const c = $('#assetsList'); if (c) c.innerHTML = (STATE.assets || []).map(assetRow).join(''); };
-const rebuildLiabs  = () => { const c = $('#liabList'); if (c) c.innerHTML = (STATE.liabilities || []).map(liabRow).join(''); };
-const rebuildGoals  = () => { const c = $('#goalsList'); if (c) c.innerHTML = (STATE.goals || []).map(goalRow).join(''); };
-const rebuildEvents = () => { const c = $('#eventsList'); if (c) c.innerHTML = (STATE.events || []).map(eventRow).join(''); };
+const rebuildAssets = () => $$('#assetsList').forEach(c => c.innerHTML = (STATE.assets || []).map(assetRow).join(''));
+const rebuildLiabs  = () => $$('#liabList').forEach(c => c.innerHTML = (STATE.liabilities || []).map(liabRow).join(''));
+const rebuildGoals  = () => $$('#goalsList').forEach(c => c.innerHTML = (STATE.goals || []).map(goalRow).join(''));
+const rebuildEvents = () => $$('#eventsList').forEach(c => c.innerHTML = (STATE.events || []).map(eventRow).join(''));
 
 /* ----------------------------- actions ------------------------------------ */
 function handleAction(action, el) {
@@ -1959,7 +2134,7 @@ function handleAction(action, el) {
     case 'goto': showView(el.dataset.view); break;
     case 'cf-granularity': CF_GRANULARITY = el.dataset.mode === 'five' ? 'five' : 'all'; liveCashflow(); break;
     case 'open-report': openReport(); break;
-    case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0 }; built.decision = false; showView('decision'); break;
+    case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0, insuranceMult: 1, ltcCoverage: 0 }; built.decision = false; showView('decision'); break;
     case 'hidesec': STATE.presentation.hidden[el.dataset.key] = el.checked; scheduleSave(); recompute(); break;
     case 'save-baseline': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); recompute(); toast('Baseline saved — make a change to see the impact'); break; }
     case 'build-plan': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); showView('dashboard'); toast('Plan built — here’s the dashboard'); break; }
@@ -2010,11 +2185,23 @@ function onInput(e) {
     const lbl = $('#scnv-' + k); if (lbl) lbl.textContent = fmtScn(k, SCENARIO[k]);
     liveDecision(); return;
   }
+  if (t.matches('[data-dis]')) {
+    const k = t.getAttribute('data-dis'); DISABILITY[k] = k === 'who' ? t.value : (+t.value || 0);
+    liveDecision(); return;
+  }
+  if (t.matches('[data-surv]')) {
+    const k = t.getAttribute('data-surv'); SURVIVOR[k] = k === 'who' ? t.value : (+t.value || 0);
+    liveDecision(); return;
+  }
   if (t.matches('[data-scrub]')) { dashAge = +t.value; updateDashScrub(); return; }
 }
 function onClick(e) {
   if (!$('#planMenu').hidden && !e.target.closest('.plan-switch')) closePlanMenu();
   const pt = e.target.closest('#presentTabs .pt'); if (pt) { showPresentView(pt.dataset.view); return; }
+  const surv = e.target.closest('[data-surv-toggle]');
+  if (surv) { SURVIVOR.on = !SURVIVOR.on; surv.setAttribute('aria-checked', String(SURVIVOR.on)); liveDecision(); return; }
+  const dis = e.target.closest('[data-dis-toggle]');
+  if (dis) { DISABILITY.on = !DISABILITY.on; dis.setAttribute('aria-checked', String(DISABILITY.on)); liveDecision(); return; }
   const toggle = e.target.closest('[data-toggle]');
   if (toggle) {
     const p = toggle.getAttribute('data-toggle'), nv = !getPath(STATE, p);
