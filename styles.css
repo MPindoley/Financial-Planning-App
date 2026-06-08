@@ -360,6 +360,13 @@ body.present .advisor-only{display:none !important}
 .cf-bd-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.08rem .9rem}
 .cf-bd-row{display:flex;justify-content:space-between;align-items:center;gap:.6rem;font-size:.74rem;color:var(--muted);padding:.05rem 0}
 .cf-bd-row .dot{width:.55rem;height:.55rem;flex:0 0 auto}
+/* expenses / savings input blocks */
+.block-head{display:flex;justify-content:space-between;align-items:center;gap:.6rem;margin:.1rem 0 .5rem;flex-wrap:wrap}
+.block-title{font-family:var(--ff);font-weight:600;font-size:.98rem;color:var(--ink)}
+.budget-note{font-size:.72rem;color:var(--muted);margin:.1rem 0 .55rem;line-height:1.45}
+.budget-note b{color:var(--ink-2)}
+.block-divider{height:1px;background:var(--line);margin:1rem 0}
+.mode-seg .seg-btn{font-size:.7rem;padding:.18rem .55rem}
 .tl-milestone{margin-top:.9rem;padding:.6rem .8rem;border-radius:11px;background:var(--gold-soft);color:var(--gold-deep);
   font-size:.82rem;font-weight:600;display:flex;gap:.55rem;align-items:center;line-height:1.35}
 .tl-milestone.none{background:var(--ivory-2);color:var(--muted)}

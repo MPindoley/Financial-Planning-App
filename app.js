@@ -56,6 +56,11 @@ function pvGrowingAnnuity(pmt1, r, g, n) {
 function pmtForFV(target, r, n) { if (n <= 0) return 0; return Math.abs(r) < 1e-9 ? target / n : target * r / (pow(1 + r, n) - 1); }
 /* Immediate-annuity payout rate by purchase age (single-life, level) — used by the "buy income annuity" technique. */
 const annuityRate = a => clamp(0.05 + Math.max(0, (+a || 0) - 60) * 0.0025, 0.045, 0.09);
+/* Living expenses (annual) — from the itemized budget when in detailed mode, else the single figure. Excludes debt payments (added separately). */
+function livingExpenses(E) {
+  if (E && E.expenseMode === 'detailed') return Object.values(E.budget || {}).reduce((s, v) => s + (+v || 0), 0) * 12;
+  return +(E && E.annualExpenses) || 0;
+}
 
 /* ----------------------------- default state ------------------------------ */
 function defaultState() {
@@ -68,8 +73,8 @@ function defaultState() {
     },
     income: { clientSalary: 0, spouseSalary: 0, otherIncome: 0, salaryGrowth: 3,
               ssClient: 0, ssSpouse: 0, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 },
-    expenses: { annualExpenses: 0, retirementExpensePct: 80 },
-    savings:  { annualSavings: 0, employerMatch: 0 },
+    expenses: { annualExpenses: 0, retirementExpensePct: 80, expenseMode: 'simple', budget: { housing: 0, utilities: 0, food: 0, transportation: 0, healthcare: 0, insurance: 0, personal: 0, other: 0 } },
+    savings:  { annualSavings: 0, employerMatch: 0, mode: 'dollar', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0 },
     savingsSplit: { pretax: 70, roth: 15, taxable: 15 },
     assets: [], liabilities: [],
     insurance: { lifeClient: 0, lifeSpouse: 0 },
@@ -296,7 +301,7 @@ function simulate(S, opts = {}) {
   const split = S.savingsSplit || { pretax: 70, roth: 15, taxable: 15 };
   const totSplit = (+split.pretax || 0) + (+split.roth || 0) + (+split.taxable || 0) || 1;
   let debts = (S.liabilities || []).map(l => ({ type: l.type, bal: +l.balance || 0, rate: (+l.rate || 0) / 100, pay: (+l.payment || 0) * 12 }));
-  const baseExp = +E.annualExpenses || 0, retPct = (+E.retirementExpensePct || 100) / 100;
+  const baseExp = livingExpenses(E), retPct = (+E.retirementExpensePct || 100) / 100;
   const events = S.events || [];
   const ds = S.debtStrategy || {};                                   // debt-payoff accelerator (off by default)
   const INS = S.insurance || {};
@@ -362,11 +367,18 @@ function simulate(S, opts = {}) {
     /* contributions */
     let cPretax = 0, cRoth = 0, cTaxable = 0, match = 0;
     if (anyWorking) {
-      const sav = (+SV.annualSavings || 0) * pow(1 + salg, t);
+      let sav;
+      if (SV.mode === 'percent') {                                       // % of income — scales with salary growth automatically
+        sav = (+SV.savingsRatePct || 0) / 100 * wages;
+        const mr = Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100);
+        match = wages * mr * ((+SV.matchPct || 0) / 100);                // employer matches matchPct of pay up to matchLimitPct
+      } else {
+        sav = (+SV.annualSavings || 0) * pow(1 + salg, t);
+        match = (+SV.employerMatch || 0) * pow(1 + salg, t);
+      }
       cPretax = sav * ((+split.pretax || 0) / totSplit);
       cRoth = sav * ((+split.roth || 0) / totSplit);
       cTaxable = sav * ((+split.taxable || 0) / totSplit);
-      match = (+SV.employerMatch || 0) * pow(1 + salg, t);
     }
 
     /* spending need */
@@ -579,9 +591,11 @@ function compute(S) {
 
   /* income / expense / savings */
   const grossIncome = (+I.clientSalary || 0) + (spOn ? (+I.spouseSalary || 0) : 0) + (+I.otherIncome || 0);
-  const annualExp = +E.annualExpenses || 0;
+  const annualExp = livingExpenses(E);
   const retExpToday = annualExp * ((+E.retirementExpensePct || 100) / 100);
-  const annualSavings = (+SV.annualSavings || 0) + (+SV.employerMatch || 0);
+  const baseContrib = SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * grossIncome : (+SV.annualSavings || 0);
+  const empMatch = SV.mode === 'percent' ? grossIncome * Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100) : (+SV.employerMatch || 0);
+  const annualSavings = baseContrib + empMatch;
   const savingsRate = grossIncome > 0 ? annualSavings / grossIncome : 0;
   const emergencyMonths = annualExp > 0 ? cash / (annualExp / 12) : 0;
   const guaranteedToday = (+I.ssClient || 0) + (spOn ? (+I.ssSpouse || 0) : 0) + (+I.pension || 0);
@@ -920,7 +934,7 @@ function profileSectionStatus(S) {                        /* reuses factFinder's
   return {
     household: (c.name && (!sp.included || sp.name)) ? 'ok' : 'todo',
     income: (pos(I.clientSalary) || pos(I.otherIncome) || (sp.included && pos(I.spouseSalary))) ? 'ok' : 'todo',
-    expenses: (pos(E.annualExpenses) && (pos(SV.annualSavings) || pos(SV.employerMatch))) ? 'ok' : 'todo',
+    expenses: (livingExpenses(E) > 0 && (pos(SV.savingsRatePct) || pos(SV.annualSavings) || pos(SV.employerMatch))) ? 'ok' : 'todo',
     assets: (S.assets && S.assets.length) ? 'ok' : 'todo',
     insurance: pos(INS.lifeClient) ? 'ok' : 'todo'
     /* liabilities / assumptions / notes are optional → no status dot */
@@ -956,6 +970,31 @@ function toggleField(path, label, rebuild) {
     <button class="switch" role="switch" aria-checked="${on}" data-toggle="${path}"${rebuild ? ' data-rebuild' : ''}></button></div>`;
 }
 const sectionLabel = t => `<div class="section-label">${escapeHtml(t)}</div>`;
+const modeSeg = (action, current, opts) => `<span class="seg mode-seg" role="group">${opts.map(([v, l]) => `<button type="button" class="seg-btn ${current === v ? 'on' : ''}" data-action="${action}" data-mode="${v}">${l}</button>`).join('')}</span>`;
+const EXP_CATS = [['housing', 'Housing — rent / taxes / upkeep'], ['utilities', 'Utilities'], ['food', 'Food & groceries'], ['transportation', 'Transportation'], ['healthcare', 'Healthcare'], ['insurance', 'Insurance (non-loan)'], ['personal', 'Personal & discretionary'], ['other', 'Other']];
+const BUDGET_TEMPLATE = { housing: .30, utilities: .07, food: .12, transportation: .15, healthcare: .08, insurance: .08, personal: .15, other: .05 };
+function expensesBlock() {
+  const E = STATE.expenses, detailed = E.expenseMode === 'detailed';
+  const inputs = detailed
+    ? `<div class="grid cols-2">${EXP_CATS.map(([k, l]) => field({ path: `expenses.budget.${k}`, label: l, type: 'currency', suffix: '/mo' })).join('')}</div>`
+    : field({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' });
+  return `<div class="block-head"><span class="block-title">Living expenses</span>${modeSeg('set-exp-mode', E.expenseMode || 'simple', [['simple', 'Single total'], ['detailed', 'Monthly budget']])}</div>
+    <p class="budget-note">Living costs only — <b>loan &amp; mortgage payments are added automatically</b> from the Liabilities section, so don’t enter them here.</p>
+    ${inputs}
+    ${field({ path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today’s expenses', type: 'percent' })}`;
+}
+function savingsBlock() {
+  const SV = STATE.savings, pctMode = SV.mode === 'percent';
+  const inputs = pctMode
+    ? field({ path: 'savings.savingsRatePct', label: 'You save', hint: 'of gross income — scales as pay grows', type: 'percent' })
+      + sectionLabel('Employer 401(k) match')
+      + fieldRow({ path: 'savings.matchPct', label: 'Match', hint: '% of your contribution', type: 'percent' }, { path: 'savings.matchLimitPct', label: 'Up to', hint: '% of pay', type: 'percent' })
+    : fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' });
+  return `<div class="block-head"><span class="block-title">Savings</span>${modeSeg('set-sav-mode', SV.mode || 'dollar', [['percent', '% of income'], ['dollar', '$ per year']])}</div>
+    ${inputs}
+    ${sectionLabel('Where new savings go (tax treatment)')}
+    ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k / IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`;
+}
 
 const ASSET_TYPES = [['cash', 'Cash / Reserve'], ['taxable', 'Taxable / Brokerage'], ['traditional', 'Tax-Deferred (401k/IRA)'], ['roth', 'Roth'], ['education', 'Education (529)'], ['realestate', 'Real Estate'], ['other', 'Other']];
 const LIAB_TYPES = [['mortgage', 'Mortgage'], ['auto', 'Auto Loan'], ['student', 'Student Loan'], ['credit', 'Credit Card'], ['other', 'Other']];
@@ -1116,6 +1155,7 @@ function headBlock(eyebrow, title, sub, extra = '') {
 function ensureDefaults(S) {
   const d = defaultState();
   ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'debtStrategy', 'pensionElection', 'charitableStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
+  S.expenses.budget = Object.assign({}, d.expenses.budget, S.expenses.budget);   // deep-merge budget categories for older plans
   S.household = S.household || d.household;
   S.household.client = Object.assign({}, d.household.client, S.household.client);
   S.household.spouse = Object.assign({}, d.household.spouse, S.household.spouse);
@@ -1311,10 +1351,9 @@ function buildProfile() {
       ${fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, spOn ? { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
       ${spOn ? field({ path: 'income.pension', label: 'Pension', type: 'currency' }) : ''}`, { status: st.income }) +
     collapsiblePanel('expenses', 'Expenses & Savings', `
-      ${fieldRow({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' }, { path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today', type: 'percent' })}
-      ${fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' })}
-      ${sectionLabel('Where new savings go (tax treatment)')}
-      ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k/IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`, { status: st.expenses }) +
+      ${expensesBlock()}
+      <div class="block-divider"></div>
+      ${savingsBlock()}`, { status: st.expenses }) +
     collapsiblePanel('assets', 'Assets', `<div id="assetsList">${(STATE.assets || []).map(assetRow).join('')}</div>
       <button class="add-row" data-action="add-asset">＋ Add account</button>`, { status: st.assets, sub: 'Investable, education & property' }) +
     collapsiblePanel('liabilities', 'Liabilities', `<div id="liabList">${(STATE.liabilities || []).map(liabRow).join('')}</div>
@@ -1342,8 +1381,8 @@ function factFinder(S) {
   const c = S.household.client, sp = S.household.spouse, I = S.income, E = S.expenses, SV = S.savings, INS = S.insurance;
   add(c.name ? 'ok' : 'todo', 'Client name', c.name ? '' : 'Full name');
   add((+I.clientSalary > 0 || +I.otherIncome > 0) ? 'ok' : 'todo', 'Income', I.clientSalary > 0 ? '' : 'Annual salary / income');
-  add(+E.annualExpenses > 0 ? 'ok' : 'todo', 'Living expenses', E.annualExpenses > 0 ? '' : 'Annual spending');
-  add((+SV.annualSavings > 0 || +SV.employerMatch > 0) ? 'ok' : 'todo', 'Savings rate', SV.annualSavings > 0 ? '' : 'Saved per year');
+  add(livingExpenses(E) > 0 ? 'ok' : 'todo', 'Living expenses', livingExpenses(E) > 0 ? '' : 'Annual spending');
+  add((+SV.savingsRatePct > 0 || +SV.annualSavings > 0 || +SV.employerMatch > 0) ? 'ok' : 'todo', 'Savings rate', (+SV.savingsRatePct > 0 || +SV.annualSavings > 0) ? '' : 'Saved per year');
   add((S.assets && S.assets.length) ? 'ok' : 'todo', 'Accounts & assets', (S.assets && S.assets.length) ? `${S.assets.length} entered` : 'Add accounts');
   add(+I.ssClient > 0 ? 'ok' : 'todo', 'Social Security', I.ssClient > 0 ? '' : 'Est. benefit (ssa.gov)');
   add(+INS.lifeClient > 0 ? 'ok' : 'todo', 'Life insurance', INS.lifeClient > 0 ? '' : 'Existing coverage');
@@ -1355,7 +1394,8 @@ function factFinder(S) {
   if (debtsMissing.length) add('warn', 'Debt details', `${debtsMissing.length} missing rate/payment`);
   if (+c.retireAge <= +c.age && +c.age > 0) add('warn', 'Retirement age', 'At/below current age');
   const gross = (+I.clientSalary || 0) + (+I.spouseSalary || 0) + (+I.otherIncome || 0);
-  if (gross > 0 && ((+SV.annualSavings || 0) + (+SV.employerMatch || 0)) > gross) add('warn', 'Savings vs income', 'Savings exceed income');
+  const effSav = SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * gross : ((+SV.annualSavings || 0) + (+SV.employerMatch || 0));
+  if (gross > 0 && effSav > gross) add('warn', 'Savings vs income', 'Savings exceed income');
   return out;
 }
 function factFinderPanel() {
@@ -1382,7 +1422,34 @@ function liveProfile() {
     ${progressBar('Emergency fund (of 6 months)', R.emergencyMonths / 6, {})}
     `, { sub: 'Live' }) +
     `<div style="height:1rem"></div>` +
+    budgetSnapshot(R) +
+    `<div style="height:1rem"></div>` +
     panel('Net Worth', netWorthTable(R));
+}
+function budgetSnapshot(R) {
+  const mIncome = R.grossIncome / 12, mLiving = R.annualExp / 12;
+  const liabs = STATE.liabilities || [], SV = STATE.savings;
+  const mDebt = liabs.reduce((s, l) => s + (+l.payment || 0), 0);
+  const mSave = (SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * R.grossIncome : (+SV.annualSavings || 0)) / 12;
+  const mTax = (R.rows && R.rows[0] ? R.rows[0].taxes : 0) / 12;
+  const mLeft = mIncome - mLiving - mDebt - mSave - mTax;
+  const items = [
+    { label: 'Taxes (est.)', value: mTax, color: 'var(--ink)' },
+    { label: 'Living expenses', value: mLiving, color: 'var(--gold)' },
+    { label: 'Debt payments', value: mDebt, color: '#b08968' },
+    { label: 'Savings', value: mSave, color: 'var(--good)' },
+    { label: mLeft >= 0 ? 'Unallocated cushion' : 'Over budget', value: Math.abs(mLeft), color: mLeft >= 0 ? '#7c8aa0' : 'var(--bad)' }
+  ].filter(x => x.value > 1);
+  const tot = items.reduce((s, x) => s + x.value, 0) || 1;
+  const bar = items.map(x => `<i style="width:${(x.value / tot * 100).toFixed(1)}%;background:${x.color}" title="${escapeAttr(x.label)}"></i>`).join('') || '<i style="width:100%;background:var(--ivory-2)"></i>';
+  const list = items.map(x => `<div class="cf-bd-row"><span><i class="dot" style="background:${x.color}"></i>${x.label}</span><b class="amount">${fmt$(x.value)}/mo</b></div>`).join('');
+  if (mIncome <= 0) return panel('Monthly Budget', '<div class="empty">Enter income to see the monthly budget.</div>', { sub: 'Where the money goes', hideKey: 'prof-budget' });
+  return panel('Monthly Budget', `
+    <div class="progress-label"><span>Gross income</span><b class="amount">${fmt$(mIncome)}/mo</b></div>
+    <div class="compbar" style="height:16px">${bar}</div>
+    <div class="cf-bd-list">${list}</div>
+    ${mDebt > 0 ? `<p class="budget-note" style="margin-top:.55rem"><b>${fmt$(mDebt)}/mo</b> of loan payments (from ${liabs.length} liabilit${liabs.length === 1 ? 'y' : 'ies'}) are added on top of living expenses — your mortgage belongs in Liabilities, not the budget above.</p>` : '<p class="budget-note" style="margin-top:.55rem">No liabilities entered. Add a mortgage or loan in the Liabilities section and its payment flows in here automatically.</p>'}
+  `, { sub: 'Where the money goes', hideKey: 'prof-budget' });
 }
 
 /* ----------------------------- NEEDS ANALYSIS ----------------------------- */
@@ -1937,10 +2004,9 @@ function buildIntake() {
       ${fieldRow({ path: 'income.clientSalary', label: 'Client salary', type: 'currency' }, spOn ? { path: 'income.spouseSalary', label: 'Spouse salary', type: 'currency' } : { path: 'income.otherIncome', label: 'Other income', type: 'currency' })}
       ${spOn ? fieldRow({ path: 'income.otherIncome', label: 'Other income', type: 'currency' }, { path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' }) : field({ path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' })}`) +
     collapsiblePanel('ih-expenses', '3 · Expenses & Savings', `
-      ${fieldRow({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' }, { path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' })}
-      ${field({ path: 'savings.employerMatch', label: 'Employer match', type: 'currency' })}
-      ${sectionLabel('Where new savings go (tax treatment)')}
-      ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k/IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`) +
+      ${expensesBlock()}
+      <div class="block-divider"></div>
+      ${savingsBlock()}`) +
     collapsiblePanel('ih-assets', '4 · Accounts & Assets', `<div id="assetsList">${(STATE.assets || []).map(assetRow).join('')}</div>
       <button class="add-row" data-action="add-asset">＋ Add account</button>`, { sub: 'Investable, education & property' }) +
     collapsiblePanel('ih-liabilities', '5 · Liabilities', `<div id="liabList">${(STATE.liabilities || []).map(liabRow).join('')}</div>
@@ -2199,6 +2265,20 @@ function handleAction(action, el) {
     case 'del-event': STATE.events.splice(idx, 1); rebuildEvents(); recompute(); break;
     case 'goto': showView(el.dataset.view); break;
     case 'cf-granularity': CF_GRANULARITY = el.dataset.mode === 'five' ? 'five' : 'all'; liveCashflow(); break;
+    case 'set-exp-mode': {
+      const m = el.dataset.mode, E = STATE.expenses;
+      if (m === 'detailed' && Object.values(E.budget || {}).reduce((s, v) => s + (+v || 0), 0) === 0 && (+E.annualExpenses || 0) > 0) {
+        const mo = (+E.annualExpenses) / 12; Object.keys(BUDGET_TEMPLATE).forEach(k => E.budget[k] = Math.round(mo * BUDGET_TEMPLATE[k]));
+      }
+      if (m === 'simple') E.annualExpenses = livingExpenses(E);
+      E.expenseMode = m; built[currentView] = false; RESULTS = compute(STATE); showView(currentView); scheduleSave(); break;
+    }
+    case 'set-sav-mode': {
+      const m = el.dataset.mode, SV = STATE.savings, gi = RESULTS.grossIncome || 0;
+      if (m === 'percent' && (+SV.savingsRatePct || 0) === 0 && (+SV.annualSavings || 0) > 0 && gi > 0) SV.savingsRatePct = +((+SV.annualSavings) / gi * 100).toFixed(1);
+      if (m === 'dollar' && (+SV.annualSavings || 0) === 0 && (+SV.savingsRatePct || 0) > 0 && gi > 0) SV.annualSavings = Math.round((+SV.savingsRatePct) / 100 * gi);
+      SV.mode = m; built[currentView] = false; RESULTS = compute(STATE); showView(currentView); scheduleSave(); break;
+    }
     case 'open-report': openReport(); break;
     case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0, insuranceMult: 1, ltcCoverage: 0 }; built.decision = false; showView('decision'); break;
     case 'hidesec': STATE.presentation.hidden[el.dataset.key] = el.checked; scheduleSave(); recompute(); break;
