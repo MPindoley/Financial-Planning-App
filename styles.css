@@ -216,6 +216,8 @@ select{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='ht
 .rr-cell input,.rr-cell select,.rr-cell .control{width:100%}
 .rr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:.55rem;grid-column:1/-1;margin-top:.5rem}
 .rr-note{font-size:.74rem;color:var(--muted);margin:.4rem 0 .15rem;line-height:1.45}
+.rr-plan{display:flex;align-items:center;gap:.5rem;margin-top:.5rem;font-size:.74rem;color:var(--muted)}
+.rr-plan .switch{flex:0 0 auto}
 .repeat-row .rr-del{justify-self:end;color:var(--bad);font-size:1.1rem;line-height:1;padding:2px 7px;border-radius:6px}
 .repeat-row .rr-del:hover{background:var(--bad-bg)}
 .add-row{display:inline-flex;align-items:center;gap:.4rem;font-size:.78rem;font-weight:600;color:var(--gold-deep);padding:.45rem .2rem}

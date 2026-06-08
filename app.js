@@ -54,6 +54,12 @@ function pvGrowingAnnuity(pmt1, r, g, n) {
   return pmt1 / (r - g) * (1 - pow((1 + g) / (1 + r), n));
 }
 function pmtForFV(target, r, n) { if (n <= 0) return 0; return Math.abs(r) < 1e-9 ? target / n : target * r / (pow(1 + r, n) - 1); }
+/* Level monthly payment that amortizes a loan: principal P, annual rate % over `years`. */
+function loanPayment(P, ratePct, years) {
+  const r = (+ratePct || 0) / 100 / 12, n = (+years || 0) * 12;
+  if (n <= 0 || P <= 0) return 0;
+  return Math.abs(r) < 1e-9 ? P / n : P * r / (1 - pow(1 + r, -n));
+}
 /* Immediate-annuity payout rate by purchase age (single-life, level) — used by the "buy income annuity" technique. */
 const annuityRate = a => clamp(0.05 + Math.max(0, (+a || 0) - 60) * 0.0025, 0.045, 0.09);
 /* Living expenses (annual) — from the itemized budget when in detailed mode, else the single figure. Excludes debt payments (added separately). */
@@ -265,6 +271,27 @@ function applyEventsYear(events, age, t, infl) {
   });
   return { in: cashIn, out: cashOut };
 }
+/* Recurring/period outflows from goals the user has flagged onto the plan timeline (off unless onPlan). */
+function goalSpendYear(goals, age, infl, curAge, eduI) {
+  let out = 0;
+  (goals || []).forEach(go => {
+    if (!go.onPlan) return;
+    if (go.type === 'education') {
+      const start = curAge + (+go.years || 0), dur = Math.max(1, +go.duration || 1);
+      if (age >= start && age < start + dur) out += (+go.amount || 0) * pow(1 + eduI, age - curAge);
+    } else if (go.type === 'ltc') {
+      const start = +go.startAge || 0, dur = Math.max(1, +go.duration || 1), cov = (+go.coverage || 0) / 100;
+      if (start > 0 && age >= start && age < start + dur) out += (+go.amount || 0) * (1 - cov) * pow(1 + infl, age - curAge);
+    } else if (['custom', 'travel', 'gifting', 'charitable'].includes(go.type)) {
+      const sA = +go.startAge || 0, eA = Math.max(sA, +go.endAge || sA), freq = go.frequency || 'once', gi = (go.inflation != null && go.inflation !== '' ? +go.inflation : infl * 100) / 100;
+      if (sA > 0) {
+        if (freq === 'once') { if (age === sA) out += (+go.amount || 0) * pow(1 + gi, age - curAge); }
+        else if (age >= sA && age <= eA) out += (+go.amount || 0) * (freq === 'monthly' ? 12 : 1) * pow(1 + gi, age - curAge);
+      }
+    }
+  });
+  return out;
+}
 function rothConversionYear(S, ctx) {
   const rs = S.rothStrategy; if (!rs || !rs.on) return 0;
   const { age, bDef, filing, inflFac, pension, ss, rmd } = ctx;
@@ -290,7 +317,7 @@ function sequenceWithdrawals(W, bTax, bDef, bRoth, basis) {
 function simulate(S, opts = {}) {
   const A = S.assumptions, H = S.household, I = S.income, E = S.expenses, SV = S.savings;
   const infl = A.inflation / 100, pre = blendedPreReturn(S), post = A.postReturn / 100,
-        salg = (+I.salaryGrowth || 0) / 100, cola = (+A.ssCola || 0) / 100;
+        salg = (+I.salaryGrowth || 0) / 100, cola = (+A.ssCola || 0) / 100, eduI = (A.eduInflation != null ? +A.eduInflation : 5) / 100;
   const stateRate = +A.stateTaxRate || 0, divYield = (A.dividendYield != null ? +A.dividendYield : 1.8) / 100;
   const filing = H.filing || 'married';
   const c = H.client, sp = H.spouse, spOn = !!sp.included;
@@ -305,7 +332,8 @@ function simulate(S, opts = {}) {
   let bTax = (by.cash || 0) + (by.taxable || 0) + (by.other || 0);
   let bDef = (by.traditional || 0), bRoth = (by.roth || 0);
   let basis = ((A.taxableBasisPct != null ? +A.taxableBasisPct : 60) / 100) * bTax;
-  const reStatic = by.realestate || 0, eduStatic = by.education || 0;
+  let reStatic = by.realestate || 0; const eduStatic = by.education || 0;
+  const homeBuys = (S.goals || []).filter(gg => gg.type === 'home' && +gg.buyAge > 0);   // future home purchases modeled in the projection
 
   const split = S.savingsSplit || { pretax: 70, roth: 15, taxable: 15 };
   const totSplit = (+split.pretax || 0) + (+split.roth || 0) + (+split.taxable || 0) || 1;
@@ -356,6 +384,23 @@ function simulate(S, opts = {}) {
       if (ev.type === 'annuity' && age === (+ev.atAge || 0)) { let prem = (+ev.amount || 0) * g; const tT = Math.min(bTax, prem); bTax -= tT; prem -= tT; const tD = Math.min(bDef, prem); bDef -= tD; prem -= tD; bRoth -= Math.min(bRoth, prem); if (basis > bTax) basis = bTax; }   // premium out of portfolio
     });
     if (deathBenefit > 0) { bTax += deathBenefit; basis += deathBenefit; }   // life-insurance payout to the survivor
+    homeBuys.forEach(h => {                                            // buy a home: spend the down payment, take on a mortgage
+      if (age === Math.round(+h.buyAge || 0)) {
+        const price = (+h.price || 0) * g, down = price * ((h.downPct != null ? +h.downPct : 20) / 100);
+        let d = down; const t1 = Math.min(bTax, d); bTax -= t1; d -= t1; const t2 = Math.min(bDef, d); bDef -= t2; d -= t2; bRoth -= Math.min(bRoth, d);
+        if (basis > bTax) basis = bTax;
+        reStatic += price;                                            // the home enters net worth
+        const loan = Math.max(0, price - down);
+        if (loan > 0) debts.push({ type: 'mortgage', bal: loan, rate: (+h.rate || 6) / 100, pay: loanPayment(loan, +h.rate || 6, +h.term || 30) * 12 });
+      }
+    });
+    (S.goals || []).forEach(go => {                                   // major purchase (cash or financed) flagged onto the timeline
+      if (!go.onPlan || go.type !== 'purchase' || age !== Math.round(+go.buyAge || (curAge + (+go.years || 0)))) return;
+      const amt = (+go.amount || 0) * g, financed = (+go.term || 0) > 0, spend = financed ? amt * ((go.downPct != null ? +go.downPct : 20) / 100) : amt;
+      let d = spend; const t1 = Math.min(bTax, d); bTax -= t1; d -= t1; const t2 = Math.min(bDef, d); bDef -= t2; d -= t2; bRoth -= Math.min(bRoth, d);
+      if (basis > bTax) basis = bTax;
+      if (financed) { const loan = amt - spend; if (loan > 0) debts.push({ type: 'other', bal: loan, rate: (+go.rate || 6) / 100, pay: loanPayment(loan, +go.rate || 6, +go.term || 5) * 12 }); }
+    });
 
     /* income */
     let wages = 0;
@@ -418,7 +463,8 @@ function simulate(S, opts = {}) {
       if (e.type === 'annuity' && age >= a0) annuityInc += (+e.amount || 0) * pow(1 + infl, Math.max(0, a0 - curAge)) * annuityRate(a0);
       if (e.type === 'sellAsset' && age >= a0) expenseCut += (+e.cut || 0) * g;
     });
-    const need = Math.max(0, expenses - expenseCut) + debtPay + ev.out;
+    const gOut = goalSpendYear(S.goals, age, infl, curAge, eduI);     // education / LTC / recurring goal spend on the timeline
+    const need = Math.max(0, expenses - expenseCut) + debtPay + ev.out + gOut;
 
     let rmd = (age >= rmdAge && bDef > 0) ? bDef / rmdDivisor(age) : 0;
     const qcdAmt = (cs.on && retired && age >= rmdAge && bDef > 0) ? Math.min((+cs.qcd || 0) * g, rmd, bDef) : 0;   // QCD satisfies RMD tax-free
@@ -512,7 +558,7 @@ function monteCarlo(S, trials) {
     endP10: q(0.10), endP50: q(0.50), endP90: q(0.90) };
 }
 function mcSignature(S) {
-  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.rothStrategy, S.debtStrategy, S.survivor, S.disability, S.pensionElection, S.charitableStrategy]);
+  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.goals, S.rothStrategy, S.debtStrategy, S.survivor, S.disability, S.pensionElection, S.charitableStrategy]);
 }
 const MC_MULTI = new Map();
 function mcFor(S, trials) {
@@ -556,20 +602,35 @@ function ssOptimize(pia, currentAge, lifeExp, cola) {
 
 /* ----------------------------- compute engine ----------------------------- */
 function computeGoal(g, ctx) {
-  const { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife, endingBalance = 0, estate = {}, curAge = 0 } = ctx;
+  const { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife, endingBalance = 0, estate = {}, curAge = 0, annualExp = 0, cash = 0 } = ctx;
   const years = +g.years || 0;
   let target, projected, reqMonthly = 0;
+  const accum = (tgt, yrs) => { projected = fv(+g.funded || 0, pre, yrs) + fvAnnuity((+g.monthly || 0) * 12, pre, yrs); reqMonthly = pmtForFV(Math.max(0, tgt - fv(+g.funded || 0, pre, yrs)), pre, yrs) / 12; return tgt; };
   if (g.type === 'retirement') { target = capitalNeeded; projected = projAtRet; }
   else if (g.type === 'protection') { target = totalProtNeed; projected = existingLife; }
   else if (g.type === 'legacy') { target = (+g.amount || +estate.legacyTarget || 0); projected = endingBalance; }   // funded by the projected estate
-  else if (g.type === 'custom') {                                            // fully custom: amount, start/end age, frequency, own inflation
+  else if (g.type === 'home') {                                              // save the down payment by the purchase date
+    const yrs = Math.max(0, (+g.buyAge || 0) - curAge);
+    target = accum((+g.price || 0) * ((g.downPct != null ? +g.downPct : 20) / 100) * pow(1 + infl, yrs), yrs);
+  }
+  else if (g.type === 'emergency') { target = (g.months != null ? +g.months : 6) * (annualExp / 12); projected = cash + (+g.funded || 0); }
+  else if (g.type === 'ltc') {                                               // future care cost over a duration, net of insurance coverage
+    const yrs = Math.max(0, (+g.startAge || 0) - curAge), dur = Math.max(1, +g.duration || 1), cov = (+g.coverage || 0) / 100;
+    let fc = 0; for (let k = 0; k < dur; k++) fc += (+g.amount || 0) * (1 - cov) * pow(1 + infl, yrs + k);
+    target = accum(fc, yrs);
+  }
+  else if (g.type === 'purchase') {                                          // cash or financed; save the cash price or the down payment
+    const bA = +g.buyAge || (curAge + years), yrs = Math.max(0, bA - curAge), financed = (+g.term || 0) > 0;
+    const base = financed ? (+g.amount || 0) * ((g.downPct != null ? +g.downPct : 20) / 100) : (+g.amount || 0);
+    target = accum(base * pow(1 + infl, yrs), yrs);
+  }
+  else if (['custom', 'travel', 'gifting', 'charitable'].includes(g.type)) {  // recurring/one-time spend over a period, own inflation
     const gi = (g.inflation != null && g.inflation !== '' ? +g.inflation : infl * 100) / 100;
-    const sA = +g.startAge || curAge, eA = Math.max(sA, +g.endAge || sA), freq = g.frequency || 'once';
-    const yTo = Math.max(0, sA - curAge);
-    if (freq === 'once') target = (+g.amount || 0) * pow(1 + gi, yTo);
-    else { const per = (+g.amount || 0) * (freq === 'monthly' ? 12 : 1); let s = 0; for (let a = sA; a <= eA; a++) s += per * pow(1 + gi, Math.max(0, a - curAge)); target = s; }
-    projected = fv(+g.funded || 0, pre, yTo) + fvAnnuity((+g.monthly || 0) * 12, pre, yTo);
-    reqMonthly = pmtForFV(Math.max(0, target - fv(+g.funded || 0, pre, yTo)), pre, yTo) / 12;
+    const sA = +g.startAge || curAge, eA = Math.max(sA, +g.endAge || sA), freq = g.frequency || 'once', yTo = Math.max(0, sA - curAge);
+    let tgt;
+    if (freq === 'once') tgt = (+g.amount || 0) * pow(1 + gi, yTo);
+    else { const per = (+g.amount || 0) * (freq === 'monthly' ? 12 : 1); tgt = 0; for (let a = sA; a <= eA; a++) tgt += per * pow(1 + gi, Math.max(0, a - curAge)); }
+    target = accum(tgt, yTo);
   }
   else if (g.type === 'education') {
     const dur = Math.max(1, +g.duration || 1), cost = +g.amount || 0;
@@ -671,7 +732,7 @@ function compute(S) {
 
   /* goals */
   const estate = S.estate || {};
-  const goalCtx = { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife, endingBalance, estate, curAge };
+  const goalCtx = { infl, pre, eduI, capitalNeeded, projAtRet, totalProtNeed, existingLife, endingBalance, estate, curAge, annualExp, cash };
   const goals = (S.goals || []).map(g => computeGoal(g, goalCtx));
   if ((+estate.legacyTarget || 0) > 0 && !goals.some(g => g.type === 'legacy'))   // estate legacy target funds a real goal vs projected estate
     goals.push(computeGoal({ id: 'estate-legacy', name: 'Legacy / Estate', type: 'legacy', priority: 'Legacy' }, goalCtx));
@@ -1050,29 +1111,37 @@ function liabRow(l, i) {
     <div class="rr-cell"><label>Liability</label><input type="text" data-arr="liabilities" data-idx="${i}" data-key="name" value="${escapeAttr(l.name)}" placeholder="e.g. Mortgage"></div>
     <div class="rr-cell"><label>Type</label><select data-arr="liabilities" data-idx="${i}" data-key="type">${typeOpts(LIAB_TYPES, l.type)}</select></div>
     <button class="rr-del" data-action="del-liab" data-idx="${i}" title="Remove">×</button>
-    <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.5rem">
+    <div class="rr-grid" style="grid-column:1/-1">
       <div class="rr-cell"><label>Balance owed</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(l.balance)}"></div></div>
       <div class="rr-cell"><label>Interest rate</label><div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="liabilities" data-idx="${i}" data-key="rate" data-vtype="percent" value="${l.rate || 0}"><span class="suffix">%</span></div></div>
+      <div class="rr-cell"><label>Term left (yrs)</label><input type="number" min="0" step="1" data-arr="liabilities" data-idx="${i}" data-key="term" value="${l.term != null && l.term !== '' ? l.term : ''}" placeholder="${l.type === 'mortgage' ? '30' : ''}"></div>
       <div class="rr-cell"><label>Monthly payment</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="liabilities" data-idx="${i}" data-key="payment" data-money value="${moneyDisplay(l.payment || 0)}"></div></div>
     </div></div>`;
 }
-const GOAL_TYPES = [['retirement', 'Retirement'], ['education', 'Education / college'], ['purchase', 'Major purchase'], ['travel', 'Travel / lifestyle'], ['gifting', 'Gifting'], ['charitable', 'Charitable giving'], ['debt', 'Debt payoff'], ['emergency', 'Emergency reserve'], ['protection', 'Survivor / income-replacement'], ['ltc', 'Long-term care'], ['legacy', 'Legacy / estate'], ['custom', 'Custom']];
+const GOAL_TYPES = [['retirement', 'Retirement'], ['home', 'Buy a home'], ['education', 'Education / college'], ['purchase', 'Major purchase'], ['travel', 'Travel / lifestyle'], ['gifting', 'Gifting'], ['charitable', 'Charitable giving'], ['debt', 'Debt payoff'], ['emergency', 'Emergency reserve'], ['protection', 'Survivor / income-replacement'], ['ltc', 'Long-term care'], ['legacy', 'Legacy / estate'], ['custom', 'Custom']];
 function goalRow(g, i) {
   const isMgmt = g.type === 'retirement' || g.type === 'protection';
   const isLegacy = g.type === 'legacy', isCustom = g.type === 'custom', isEdu = g.type === 'education';
   const M = (label, key) => `<div class="rr-cell"><label>${label}</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="${key}" data-money value="${moneyDisplay(g[key] || 0)}"></div></div>`;
   const N = (label, key, def) => `<div class="rr-cell"><label>${label}</label><input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="${key}" value="${g[key] != null && g[key] !== '' ? g[key] : (def != null ? def : '')}"></div>`;
+  const P = (label, key, def) => `<div class="rr-cell"><label>${label}</label><div class="control has-suffix"><input type="number" min="0" step="0.1" data-arr="goals" data-idx="${i}" data-key="${key}" value="${g[key] != null && g[key] !== '' ? g[key] : (def != null ? def : '')}"><span class="suffix">%</span></div></div>`;
   const grid = inner => `<div class="rr-grid">${inner}</div>`;
+  const isRecurring = ['custom', 'travel', 'gifting', 'charitable'].includes(g.type);
+  const injectable = isRecurring || g.type === 'education' || g.type === 'ltc' || g.type === 'purchase';
+  const planToggle = injectable ? `<div class="rr-plan"><button type="button" class="switch" role="switch" aria-checked="${!!g.onPlan}" data-goalplan data-idx="${i}"></button><span>${g.onPlan ? 'Spending flows through your plan timeline' : 'Funding tracker only — turn on to model it on your timeline'}</span></div>` : '';
+  const freqSel = `<div class="rr-cell"><label>How often</label><select data-arr="goals" data-idx="${i}" data-key="frequency" data-vtype="text"><option value="once" ${(g.frequency || 'once') === 'once' ? 'selected' : ''}>One-time</option><option value="annual" ${g.frequency === 'annual' ? 'selected' : ''}>Every year</option><option value="monthly" ${g.frequency === 'monthly' ? 'selected' : ''}>Every month</option></select></div>`;
+  const inflCell = `<div class="rr-cell"><label>Inflation / yr</label><div class="control has-suffix"><input type="number" min="0" step="0.1" data-arr="goals" data-idx="${i}" data-key="inflation" data-vtype="percent" value="${g.inflation != null ? g.inflation : ''}" placeholder="plan"><span class="suffix">%</span></div></div>`;
   let body;
   if (isMgmt) body = `<div class="rr-note">Calculated automatically from your Retirement &amp; Protection inputs — nothing to enter here.</div>`;
+  else if (g.type === 'home') body = grid(M('Home price ($)', 'price') + P('Down payment', 'downPct', 20) + N('Buy at age', 'buyAge') + N('Mortgage term (yrs)', 'term', 30) + P('Interest rate', 'rate', 6) + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'))
+      + `<div class="rr-note">You save the <b>down payment</b>; at purchase the rest becomes a mortgage whose payment flows through your plan for the term.</div>`;
   else if (isLegacy) body = grid(M('Legacy target ($)', 'amount')) + `<div class="rr-note">Measured against your projected estate (ending portfolio).</div>`;
-  else if (isCustom) body = grid(
-      M('Amount each time ($)', 'amount') +
-      `<div class="rr-cell"><label>How often</label><select data-arr="goals" data-idx="${i}" data-key="frequency" data-vtype="text"><option value="once" ${(g.frequency || 'once') === 'once' ? 'selected' : ''}>One-time</option><option value="annual" ${g.frequency === 'annual' ? 'selected' : ''}>Every year</option><option value="monthly" ${g.frequency === 'monthly' ? 'selected' : ''}>Every month</option></select></div>` +
-      N('Start age', 'startAge') + N('End age', 'endAge') +
-      `<div class="rr-cell"><label>Inflation / yr</label><div class="control has-suffix"><input type="number" min="0" step="0.1" data-arr="goals" data-idx="${i}" data-key="inflation" data-vtype="percent" value="${g.inflation != null ? g.inflation : ''}" placeholder="plan"><span class="suffix">%</span></div></div>` +
-      M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'));
-  else if (isEdu) body = grid(M('Annual cost ($)', 'amount') + N('Years until', 'years') + N('Years of school', 'duration', 4) + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'));
+  else if (g.type === 'emergency') body = grid(N('Months of expenses', 'months', 6) + M('Reserve already set aside ($)', 'funded')) + `<div class="rr-note">Target = months × your monthly expenses, measured against current cash.</div>`;
+  else if (g.type === 'ltc') body = grid(M('Annual care cost ($)', 'amount') + N('Care starts at age', 'startAge') + N('For how many years', 'duration', 3) + P('Insurance covers', 'coverage') + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly')) + planToggle;
+  else if (g.type === 'purchase') body = grid(M('Purchase amount ($)', 'amount') + N('Buy at age', 'buyAge') + N('Loan term — 0 = cash', 'term') + P('Interest rate', 'rate', 6) + P('Down payment', 'downPct', 20) + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'))
+      + `<div class="rr-note">Leave <b>term = 0</b> to pay cash; set a term to finance it (down payment now, payments over the term).</div>` + planToggle;
+  else if (isRecurring) body = grid(M('Amount each time ($)', 'amount') + freqSel + N('Start age', 'startAge') + N('End age', 'endAge') + inflCell + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly')) + planToggle;
+  else if (isEdu) body = grid(M('Annual cost ($)', 'amount') + N('Years until', 'years') + N('Years of school', 'duration', 4) + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly')) + planToggle;
   else body = grid(M('Goal amount ($)', 'amount') + N('Years until', 'years') + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'));
   return `<div class="repeat-row" style="grid-template-columns:1fr 160px 26px">
       <div class="rr-cell"><label>Goal name</label><input type="text" data-arr="goals" data-idx="${i}" data-key="name" value="${escapeAttr(g.name)}" placeholder="e.g. New car"></div>
@@ -2341,7 +2410,7 @@ function handleAction(action, el) {
     case 'del-asset': STATE.assets.splice(idx, 1); rebuildAssets(); recompute(); break;
     case 'add-liab': (STATE.liabilities = STATE.liabilities || []).push({ id: uid(), name: '', type: 'auto', balance: 0, rate: 6, payment: 0 }); rebuildLiabs(); recompute(); break;
     case 'del-liab': STATE.liabilities.splice(idx, 1); rebuildLiabs(); recompute(); break;
-    case 'add-goal': (STATE.goals = STATE.goals || []).push({ id: uid(), name: 'New Goal', type: 'purchase', priority: 'Medium', amount: 50000, years: 5, funded: 0, monthly: 0 }); rebuildGoals(); recompute(); break;
+    case 'add-goal': (STATE.goals = STATE.goals || []).push({ id: uid(), name: 'New Goal', type: 'purchase', priority: 'Medium', amount: 50000, years: 5, buyAge: 0, funded: 0, monthly: 0, onPlan: true }); rebuildGoals(); recompute(); break;
     case 'del-goal': STATE.goals.splice(idx, 1); rebuildGoals(); recompute(); break;
     case 'add-event': (STATE.events = STATE.events || []).push({ id: uid(), type: el.dataset.type || 'expense', label: '', amount: 25000, atAge: (RESULTS.curAge || 50) + 5, startAge: (RESULTS.curAge || 50) + 5, years: 3 }); rebuildEvents(); recompute(); break;
     case 'del-event': STATE.events.splice(idx, 1); rebuildEvents(); recompute(); break;
@@ -2403,6 +2472,10 @@ function onInput(e) {
   if (t.matches('[data-arr]')) {
     const arr = t.getAttribute('data-arr'), i = +t.getAttribute('data-idx'), key = t.getAttribute('data-key');
     if (STATE[arr] && STATE[arr][i]) STATE[arr][i][key] = readVal(t);
+    if (arr === 'liabilities' && key === 'term') {                    // term → derive the amortizing monthly payment, live
+      const l = STATE.liabilities[i], p = Math.round(loanPayment(+l.balance || 0, +l.rate || 0, +l.term || 0));
+      if (p > 0) { l.payment = p; $$(`[data-arr="liabilities"][data-idx="${i}"][data-key="payment"]`).forEach(el => el.value = moneyDisplay(p)); }
+    }
     recompute();
     if (arr === 'goals' && key === 'type') rebuildGoals();
     if (arr === 'events' && key === 'type') rebuildEvents();
@@ -2439,6 +2512,12 @@ function onClick(e) {
   if (dis) { DISABILITY.on = !DISABILITY.on; dis.setAttribute('aria-checked', String(DISABILITY.on)); liveDecision(); return; }
   const cfb = e.target.closest('[data-cf-break]');
   if (cfb) { toggleCfBreakdown(cfb); return; }
+  const gp = e.target.closest('[data-goalplan]');
+  if (gp) {
+    const idx = +gp.getAttribute('data-idx'), go = STATE.goals[idx];
+    if (go) { go.onPlan = !go.onPlan; gp.setAttribute('aria-checked', String(go.onPlan)); rebuildGoals(); recompute(); }
+    return;
+  }
   const dw = e.target.closest('[data-dashwin]');
   if (dw) {
     const v = dw.getAttribute('data-dashwin'), R = RESULTS;
