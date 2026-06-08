@@ -347,6 +347,19 @@ body.present .advisor-only{display:none !important}
 .compbar i{display:block;height:100%}
 .comp-legend{display:flex;flex-wrap:wrap;gap:.3rem .8rem;font-size:.7rem;color:var(--muted)}
 .comp-legend span{display:inline-flex;align-items:center;gap:.35rem}
+/* cash-flow per-cell breakdown */
+.cf-cell{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;border-bottom:1px dashed var(--line-2);transition:color .15s var(--e1)}
+.cf-cell:hover{color:var(--gold-deep)}
+.cf-cell.on{color:var(--gold-deep);font-weight:600;border-bottom:1px solid var(--gold)}
+.cf-hint{font-size:.72rem;color:var(--faint);margin:.5rem 0 0;text-align:right}
+.cf-detail>td{background:var(--ivory-2);padding:.7rem .9rem !important;border-bottom:1px solid var(--line);text-align:left}
+.cf-bd-head{font-size:.78rem;color:var(--muted)}
+.cf-bd-head b{color:var(--ink)}
+.cf-bd-year{color:var(--faint)}
+.cf-bd .compbar{height:16px;margin:.45rem 0 .4rem}
+.cf-bd-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.08rem .9rem}
+.cf-bd-row{display:flex;justify-content:space-between;align-items:center;gap:.6rem;font-size:.74rem;color:var(--muted);padding:.05rem 0}
+.cf-bd-row .dot{width:.55rem;height:.55rem;flex:0 0 auto}
 .tl-milestone{margin-top:.9rem;padding:.6rem .8rem;border-radius:11px;background:var(--gold-soft);color:var(--gold-deep);
   font-size:.82rem;font-weight:600;display:flex;gap:.55rem;align-items:center;line-height:1.35}
 .tl-milestone.none{background:var(--ivory-2);color:var(--muted)}

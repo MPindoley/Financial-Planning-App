@@ -434,6 +434,7 @@ function simulate(S, opts = {}) {
       contribution: retired ? 0 : (cPretax + cRoth + cTaxable + match), withdrawal: retired ? (wT + wD + wR) : (wT + wD + wR),
       wTax: wT, wDef: wD, wRoth: wR, bTax, bDef, bRoth, end: portfolio, debt: totalDebt,
       reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + ss + pension + annuityInc + disabilityInc, annuity: annuityInc, disabilityInc, qcd: qcdAmt,
+      cPretax: retired ? 0 : cPretax, cRoth: retired ? 0 : cRoth, cTaxable: retired ? 0 : cTaxable, match: retired ? 0 : match, debtPay, evOut: ev.out,
       cumTax: lifetimeTax
     });
     rows.push(row);
@@ -1456,6 +1457,69 @@ let CF_GRANULARITY = 'all';   /* 'all' | 'five' — cash-flow table granularity 
 const cfGranularityToggle = () => `<span class="seg advisor-only" role="group" aria-label="Table granularity">
   <button class="seg-btn ${CF_GRANULARITY === 'all' ? 'on' : ''}" data-action="cf-granularity" data-mode="all">Every year</button>
   <button class="seg-btn ${CF_GRANULARITY === 'five' ? 'on' : ''}" data-action="cf-granularity" data-mode="five">Every 5 yrs</button></span>`;
+function cfCell(age, metric, inner) {
+  return `<button class="cf-cell" data-cf-break="${metric}" data-cf-age="${age}" aria-expanded="false" title="See the breakdown">${inner}</button>`;
+}
+function cfBreakdown(r, metric) {
+  if (metric === 'income') return { title: 'Income sources', items: [
+    { label: 'Wages / earned', value: r.wages || 0, color: 'var(--gold)' },
+    { label: 'Social Security', value: r.ss || 0, color: 'var(--ink)' },
+    { label: 'Pension', value: r.pension || 0, color: '#7c8aa0' },
+    { label: 'Annuity', value: r.annuity || 0, color: 'var(--gold-deep)' },
+    { label: 'Disability', value: r.disabilityInc || 0, color: '#b08968' }
+  ] };
+  if (metric === 'outflow') return { title: 'Where the money goes', items: [
+    { label: 'Living expenses', value: r.expenses || 0, color: 'var(--gold)' },
+    { label: 'Debt payments', value: r.debtPay || 0, color: '#b08968' },
+    { label: 'Planned events', value: r.evOut || 0, color: '#7c8aa0' },
+    { label: 'Taxes', value: r.taxes || 0, color: 'var(--ink)' }
+  ] };
+  if (metric === 'flow') return r.phase === 'work'
+    ? { title: 'Savings this year', items: [
+        { label: 'Pre-tax (401k / IRA)', value: r.cPretax || 0, color: 'var(--gold)' },
+        { label: 'Roth', value: r.cRoth || 0, color: 'var(--gold-deep)' },
+        { label: 'Taxable', value: r.cTaxable || 0, color: '#7c8aa0' },
+        { label: 'Employer match', value: r.match || 0, color: 'var(--good)' }
+      ] }
+    : { title: 'Withdrawals this year', items: [
+        { label: 'From taxable', value: r.wTax || 0, color: 'var(--gold)' },
+        { label: 'From tax-deferred', value: r.wDef || 0, color: 'var(--ink)' },
+        { label: 'From Roth', value: r.wRoth || 0, color: 'var(--gold-deep)' }
+      ] };
+  return { title: 'Portfolio composition', items: [
+    { label: 'Taxable', value: r.bTax || 0, color: 'var(--gold)' },
+    { label: 'Tax-deferred', value: r.bDef || 0, color: 'var(--ink)' },
+    { label: 'Roth', value: r.bRoth || 0, color: 'var(--gold-deep)' }
+  ] };
+}
+function cfBreakdownHTML(r, metric) {
+  const d = cfBreakdown(r, metric);
+  const items = d.items.filter(x => x.value > 0.5);
+  const total = items.reduce((s, x) => s + x.value, 0) || 1;
+  const bar = items.length
+    ? items.map(x => `<i style="width:${(x.value / total * 100).toFixed(1)}%;background:${x.color}" title="${escapeAttr(x.label)}"></i>`).join('')
+    : '<i style="width:100%;background:var(--ivory-2)"></i>';
+  const list = items.map(x => `<div class="cf-bd-row"><span><i class="dot" style="background:${x.color}"></i>${x.label}</span><b class="amount">${fmt$(x.value)} · ${pct(x.value / total * 100, 0)}</b></div>`).join('') || '<span style="color:var(--faint)">No components this year.</span>';
+  return `<div class="cf-bd">
+    <div class="cf-bd-head">${d.title} · <b class="amount">${fmt$(total)}</b> <span class="cf-bd-year">in ${r.year} (age ${r.age})</span></div>
+    <div class="compbar">${bar}</div>
+    <div class="cf-bd-list">${list}</div></div>`;
+}
+function toggleCfBreakdown(el) {
+  const tr = el.closest('tr'); if (!tr) return;
+  const metric = el.getAttribute('data-cf-break'), age = +el.getAttribute('data-cf-age');
+  const next = tr.nextElementSibling, openHere = next && next.classList.contains('cf-detail');
+  const sameCell = openHere && next.getAttribute('data-cf-metric') === metric;
+  if (openHere) next.remove();
+  tr.querySelectorAll('.cf-cell.on').forEach(b => { b.classList.remove('on'); b.setAttribute('aria-expanded', 'false'); });
+  if (sameCell) return;
+  const r = (RESULTS.rows || []).find(x => x.age === age); if (!r) return;
+  const detail = document.createElement('tr');
+  detail.className = 'cf-detail'; detail.setAttribute('data-cf-metric', metric); detail.setAttribute('data-cf-age', String(age));
+  detail.innerHTML = `<td colspan="${tr.children.length}">${cfBreakdownHTML(r, metric)}</td>`;
+  tr.insertAdjacentElement('afterend', detail);
+  el.classList.add('on'); el.setAttribute('aria-expanded', 'true');
+}
 function cashflowTable(R) {
   const rows = CF_GRANULARITY === 'five'
     ? R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge)
@@ -1463,11 +1527,13 @@ function cashflowTable(R) {
   const body = rows.map(r => {
     const flow = r.phase === 'work' ? r.contribution : -r.withdrawal;
     return `<tr><td>${r.age}</td><td style="text-align:left"><span class="badge ${r.phase === 'work' ? 'gold' : 'ink'}">${r.phase === 'work' ? 'Working' : 'Retired'}</span></td>
-      <td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.expenses)}</td>
-      <td class="amount ${flow >= 0 ? 'pos' : 'neg'}">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td>
-      <td class="amount">${fmtK(r.end)}</td></tr>`;
+      <td class="amount">${cfCell(r.age, 'income', fmtK(r.income))}</td>
+      <td class="amount">${cfCell(r.age, 'outflow', fmtK(r.expenses))}</td>
+      <td class="amount ${flow >= 0 ? 'pos' : 'neg'}">${cfCell(r.age, 'flow', (flow >= 0 ? '+' : '−') + fmtK(Math.abs(flow)))}</td>
+      <td class="amount">${cfCell(r.age, 'portfolio', fmtK(r.end))}</td></tr>`;
   }).join('');
-  return `<div class="tbl-scroll"><table class="tbl"><thead><tr><th>Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Expenses</th><th>Save / Draw</th><th>Portfolio</th></tr></thead><tbody>${body}</tbody></table></div>`;
+  return `<div class="tbl-scroll"><table class="tbl cf-tbl"><thead><tr><th>Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Expenses</th><th>Save / Draw</th><th>Portfolio</th></tr></thead><tbody>${body}</tbody></table>
+    <p class="cf-hint">Tap any amount to see how it breaks down ↓</p></div>`;
 }
 function liveCashflow() {
   const R = RESULTS, el = $('#res-cashflow'); if (!el) return;
@@ -2202,6 +2268,8 @@ function onClick(e) {
   if (surv) { SURVIVOR.on = !SURVIVOR.on; surv.setAttribute('aria-checked', String(SURVIVOR.on)); liveDecision(); return; }
   const dis = e.target.closest('[data-dis-toggle]');
   if (dis) { DISABILITY.on = !DISABILITY.on; dis.setAttribute('aria-checked', String(DISABILITY.on)); liveDecision(); return; }
+  const cfb = e.target.closest('[data-cf-break]');
+  if (cfb) { toggleCfBreakdown(cfb); return; }
   const toggle = e.target.closest('[data-toggle]');
   if (toggle) {
     const p = toggle.getAttribute('data-toggle'), nv = !getPath(STATE, p);
