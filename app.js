@@ -61,6 +61,15 @@ function livingExpenses(E) {
   if (E && E.expenseMode === 'detailed') return Object.values(E.budget || {}).reduce((s, v) => s + (+v || 0), 0) * 12;
   return +(E && E.annualExpenses) || 0;
 }
+const CONTRIB_TYPES = ['cash', 'taxable', 'traditional', 'roth', 'other'];   // accounts that accept ongoing contributions
+/* Balance-weighted expected accumulation return — lets each account carry its own growth rate in "by account" savings mode. */
+function blendedPreReturn(S) {
+  const pre = (+(S.assumptions && S.assumptions.preReturn) || 0) / 100;
+  if (!S.savings || S.savings.mode !== 'accounts') return pre;
+  let num = 0, den = 0;
+  (S.assets || []).forEach(a => { const bal = +a.balance || 0; if (bal > 0 && CONTRIB_TYPES.includes(a.type)) { num += bal * ((a.growth != null && a.growth !== '') ? +a.growth / 100 : pre); den += bal; } });
+  return den > 0 ? num / den : pre;
+}
 
 /* ----------------------------- default state ------------------------------ */
 function defaultState() {
@@ -74,7 +83,7 @@ function defaultState() {
     income: { clientSalary: 0, spouseSalary: 0, otherIncome: 0, salaryGrowth: 3,
               ssClient: 0, ssSpouse: 0, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 },
     expenses: { annualExpenses: 0, retirementExpensePct: 80, expenseMode: 'simple', budget: { housing: 0, utilities: 0, food: 0, transportation: 0, healthcare: 0, insurance: 0, personal: 0, other: 0 } },
-    savings:  { annualSavings: 0, employerMatch: 0, mode: 'dollar', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0 },
+    savings:  { annualSavings: 0, employerMatch: 0, mode: 'dollar', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0, targetRatePct: 15 },
     savingsSplit: { pretax: 70, roth: 15, taxable: 15 },
     assets: [], liabilities: [],
     insurance: { lifeClient: 0, lifeSpouse: 0 },
@@ -280,7 +289,7 @@ function sequenceWithdrawals(W, bTax, bDef, bRoth, basis) {
 /* ----------------------------- projection simulation ---------------------- */
 function simulate(S, opts = {}) {
   const A = S.assumptions, H = S.household, I = S.income, E = S.expenses, SV = S.savings;
-  const infl = A.inflation / 100, pre = A.preReturn / 100, post = A.postReturn / 100,
+  const infl = A.inflation / 100, pre = blendedPreReturn(S), post = A.postReturn / 100,
         salg = (+I.salaryGrowth || 0) / 100, cola = (+A.ssCola || 0) / 100;
   const stateRate = +A.stateTaxRate || 0, divYield = (A.dividendYield != null ? +A.dividendYield : 1.8) / 100;
   const filing = H.filing || 'married';
@@ -367,18 +376,30 @@ function simulate(S, opts = {}) {
     /* contributions */
     let cPretax = 0, cRoth = 0, cTaxable = 0, match = 0;
     if (anyWorking) {
-      let sav;
-      if (SV.mode === 'percent') {                                       // % of income — scales with salary growth automatically
-        sav = (+SV.savingsRatePct || 0) / 100 * wages;
-        const mr = Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100);
-        match = wages * mr * ((+SV.matchPct || 0) / 100);                // employer matches matchPct of pay up to matchLimitPct
+      if (SV.mode === 'accounts') {                                      // per-account contributions, classified by account type
+        (S.assets || []).forEach(a => {
+          if (!CONTRIB_TYPES.includes(a.type)) return;
+          const c = (+a.contribution || 0) * 12 * pow(1 + salg, t);
+          if (a.type === 'roth') cRoth += c; else if (a.type === 'traditional') cPretax += c; else cTaxable += c;
+        });
+        if ((+SV.matchPct || 0) > 0 && wages > 0) {                      // employer match on 401(k)/pre-tax contributions
+          const rate = Math.min(cPretax / wages, (+SV.matchLimitPct || 0) / 100);
+          match = wages * rate * ((+SV.matchPct || 0) / 100);
+        }
       } else {
-        sav = (+SV.annualSavings || 0) * pow(1 + salg, t);
-        match = (+SV.employerMatch || 0) * pow(1 + salg, t);
+        let sav;
+        if (SV.mode === 'percent') {                                     // % of income — scales with salary growth automatically
+          sav = (+SV.savingsRatePct || 0) / 100 * wages;
+          const mr = Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100);
+          match = wages * mr * ((+SV.matchPct || 0) / 100);              // employer matches matchPct of pay up to matchLimitPct
+        } else {
+          sav = (+SV.annualSavings || 0) * pow(1 + salg, t);
+          match = (+SV.employerMatch || 0) * pow(1 + salg, t);
+        }
+        cPretax = sav * ((+split.pretax || 0) / totSplit);
+        cRoth = sav * ((+split.roth || 0) / totSplit);
+        cTaxable = sav * ((+split.taxable || 0) / totSplit);
       }
-      cPretax = sav * ((+split.pretax || 0) / totSplit);
-      cRoth = sav * ((+split.roth || 0) / totSplit);
-      cTaxable = sav * ((+split.taxable || 0) / totSplit);
     }
 
     /* spending need */
@@ -462,7 +483,7 @@ function randNormal(mean, sd) {
 function monteCarlo(S, trials) {
   trials = trials || 600;
   const A = S.assumptions;
-  const pre = A.preReturn / 100, post = A.postReturn / 100;
+  const pre = blendedPreReturn(S), post = A.postReturn / 100;
   const volPre = (A.volatilityPre != null ? +A.volatilityPre : 12) / 100;
   const volPost = (A.volatilityPost != null ? +A.volatilityPost : 9) / 100;
   const sampler = retired => Math.max(-0.6, randNormal(retired ? post : pre, retired ? volPost : volPre));
@@ -593,8 +614,12 @@ function compute(S) {
   const grossIncome = (+I.clientSalary || 0) + (spOn ? (+I.spouseSalary || 0) : 0) + (+I.otherIncome || 0);
   const annualExp = livingExpenses(E);
   const retExpToday = annualExp * ((+E.retirementExpensePct || 100) / 100);
-  const baseContrib = SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * grossIncome : (+SV.annualSavings || 0);
-  const empMatch = SV.mode === 'percent' ? grossIncome * Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100) : (+SV.employerMatch || 0);
+  const acctContrib = (S.assets || []).reduce((s, a) => s + (CONTRIB_TYPES.includes(a.type) ? (+a.contribution || 0) * 12 : 0), 0);
+  const acctPretax = (S.assets || []).reduce((s, a) => s + (a.type === 'traditional' ? (+a.contribution || 0) * 12 : 0), 0);
+  const baseContrib = SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * grossIncome : SV.mode === 'accounts' ? acctContrib : (+SV.annualSavings || 0);
+  const empMatch = SV.mode === 'percent' ? grossIncome * Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100)
+    : SV.mode === 'accounts' ? (grossIncome > 0 ? grossIncome * Math.min(acctPretax / grossIncome, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100) : 0)
+    : (+SV.employerMatch || 0);
   const annualSavings = baseContrib + empMatch;
   const savingsRate = grossIncome > 0 ? annualSavings / grossIncome : 0;
   const emergencyMonths = annualExp > 0 ? cash / (annualExp / 12) : 0;
@@ -984,28 +1009,41 @@ function expensesBlock() {
     ${field({ path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today’s expenses', type: 'percent' })}`;
 }
 function savingsBlock() {
-  const SV = STATE.savings, pctMode = SV.mode === 'percent';
-  const inputs = pctMode
-    ? field({ path: 'savings.savingsRatePct', label: 'You save', hint: 'of gross income — scales as pay grows', type: 'percent' })
-      + sectionLabel('Employer 401(k) match')
-      + fieldRow({ path: 'savings.matchPct', label: 'Match', hint: '% of your contribution', type: 'percent' }, { path: 'savings.matchLimitPct', label: 'Up to', hint: '% of pay', type: 'percent' })
-    : fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' });
-  return `<div class="block-head"><span class="block-title">Savings</span>${modeSeg('set-sav-mode', SV.mode || 'dollar', [['percent', '% of income'], ['dollar', '$ per year']])}</div>
-    ${inputs}
-    ${sectionLabel('Where new savings go (tax treatment)')}
-    ${fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k / IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' })}`;
+  const SV = STATE.savings, mode = SV.mode || 'dollar';
+  const matchRow = sectionLabel('Employer 401(k) match') + fieldRow({ path: 'savings.matchPct', label: 'Match', hint: '% of your contribution', type: 'percent' }, { path: 'savings.matchLimitPct', label: 'Up to', hint: '% of pay', type: 'percent' });
+  const split = sectionLabel('Where new savings go (tax treatment)') + fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k / IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' });
+  let inputs;
+  if (mode === 'percent') inputs = field({ path: 'savings.savingsRatePct', label: 'You save', hint: 'of gross income — scales as pay grows', type: 'percent' }) + matchRow + split;
+  else if (mode === 'accounts') inputs = field({ path: 'savings.targetRatePct', label: 'Target savings rate', hint: '% of gross income — the goal to hit', type: 'percent' }) + matchRow
+    + `<p class="budget-note">Enter the <b>monthly contribution and growth for each account</b> in the Accounts section below — totals, tax treatment, and progress to your target appear in the live panel on the right.</p>`;
+  else inputs = fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' }) + split;
+  return `<div class="block-head"><span class="block-title">Savings</span>${modeSeg('set-sav-mode', mode, [['percent', '% of income'], ['accounts', 'By account'], ['dollar', '$ per year']])}</div>
+    ${inputs}`;
 }
 
 const ASSET_TYPES = [['cash', 'Cash / Reserve'], ['taxable', 'Taxable / Brokerage'], ['traditional', 'Tax-Deferred (401k/IRA)'], ['roth', 'Roth'], ['education', 'Education (529)'], ['realestate', 'Real Estate'], ['other', 'Other']];
 const LIAB_TYPES = [['mortgage', 'Mortgage'], ['auto', 'Auto Loan'], ['student', 'Student Loan'], ['credit', 'Credit Card'], ['other', 'Other']];
 const typeOpts = (types, sel) => types.map(([v, l]) => `<option value="${v}" ${v === sel ? 'selected' : ''}>${l}</option>`).join('');
 
+const ACCT_TAX = { roth: ['Roth · tax-free', 'good'], traditional: ['Tax-deferred', 'gold'], taxable: ['Taxable', 'ink'], cash: ['Taxable', 'ink'], other: ['Taxable', 'ink'], education: ['529 · education', 'gold'], realestate: ['Property', 'ink'] };
 function assetRow(a, i) {
-  return `<div class="repeat-row" style="grid-template-columns:1fr 150px 132px 24px;align-items:end">
+  const tax = ACCT_TAX[a.type] || ['Taxable', 'ink'];
+  const byAccount = (STATE.savings || {}).mode === 'accounts';
+  const canContribute = CONTRIB_TYPES.includes(a.type);
+  const defGrowth = (STATE.assumptions && STATE.assumptions.preReturn != null) ? STATE.assumptions.preReturn : 6;
+  const contribRow = byAccount ? `<div class="rr-grid" style="grid-column:1/-1;margin-top:.5rem">
+      ${canContribute
+        ? `<div class="rr-cell"><label>Saving / month ($)</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="contribution" data-money value="${moneyDisplay(a.contribution || 0)}"></div></div>
+           <div class="rr-cell"><label>Growth / yr</label><div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="assets" data-idx="${i}" data-key="growth" data-vtype="percent" value="${a.growth != null && a.growth !== '' ? a.growth : ''}" placeholder="${defGrowth}"><span class="suffix">%</span></div></div>`
+        : `<div class="rr-cell" style="grid-column:span 2"><label>Contributions</label><div class="rr-note" style="margin:0">${a.type === 'education' ? 'Fund this with an Education goal' : 'Held asset — no ongoing contributions'}</div></div>`}
+      <div class="rr-cell"><label>Tax treatment</label><div style="padding-top:.15rem">${badge(tax[0], tax[1])}</div></div>
+    </div>` : '';
+  return `<div class="repeat-row" style="grid-template-columns:1fr 170px 140px 24px;align-items:end">
     <div class="rr-cell"><label>Account name</label><input type="text" data-arr="assets" data-idx="${i}" data-key="name" value="${escapeAttr(a.name)}" placeholder="e.g. 401(k), Brokerage"></div>
-    <div class="rr-cell"><label>Type</label><select data-arr="assets" data-idx="${i}" data-key="type">${typeOpts(ASSET_TYPES, a.type)}</select></div>
-    <div class="rr-cell"><label>Balance</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(a.balance)}"></div></div>
-    <button class="rr-del" data-action="del-asset" data-idx="${i}" title="Remove">×</button></div>`;
+    <div class="rr-cell"><label>Account type</label><select data-arr="assets" data-idx="${i}" data-key="type">${typeOpts(ASSET_TYPES, a.type)}</select></div>
+    <div class="rr-cell"><label>Current balance</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="balance" data-money value="${moneyDisplay(a.balance)}"></div></div>
+    <button class="rr-del" data-action="del-asset" data-idx="${i}" title="Remove">×</button>
+    ${contribRow}</div>`;
 }
 function liabRow(l, i) {
   return `<div class="repeat-row" style="grid-template-columns:1fr 120px 24px;align-items:end">
@@ -1021,64 +1059,47 @@ function liabRow(l, i) {
 const GOAL_TYPES = [['retirement', 'Retirement'], ['education', 'Education / college'], ['purchase', 'Major purchase'], ['travel', 'Travel / lifestyle'], ['gifting', 'Gifting'], ['charitable', 'Charitable giving'], ['debt', 'Debt payoff'], ['emergency', 'Emergency reserve'], ['protection', 'Survivor / income-replacement'], ['ltc', 'Long-term care'], ['legacy', 'Legacy / estate'], ['custom', 'Custom']];
 function goalRow(g, i) {
   const isMgmt = g.type === 'retirement' || g.type === 'protection';
-  const isLegacy = g.type === 'legacy';
-  const isCustom = g.type === 'custom';
-  return `<div class="repeat-row" style="grid-template-columns:1fr 130px 26px">
-      <input type="text" data-arr="goals" data-idx="${i}" data-key="name" value="${escapeAttr(g.name)}" placeholder="Goal name">
-      <select data-arr="goals" data-idx="${i}" data-key="type">
-        ${GOAL_TYPES.map(([v, l]) => `<option value="${v}" ${v === g.type ? 'selected' : ''}>${l}</option>`).join('')}</select>
-      <button class="rr-del" data-action="del-goal" data-idx="${i}" title="Remove">×</button>
-    ${isMgmt ? `<div style="grid-column:1/-1;font-size:.72rem;color:var(--faint);margin-top:.1rem">Calculated from the Retirement & Protection inputs.</div>` :
-      isLegacy ? `<div style="grid-column:1/-1;display:grid;grid-template-columns:1fr;gap:.4rem;margin-top:.3rem">
-        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="Legacy target (today's $)"></div>
-        <div style="font-size:.72rem;color:var(--faint)">Measured against your projected estate (ending portfolio).</div></div>` :
-      isCustom ? `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-top:.3rem">
-        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="Amount per occurrence (today's $)"></div>
-        <select data-arr="goals" data-idx="${i}" data-key="frequency" data-vtype="text" title="Frequency"><option value="once" ${(g.frequency || 'once') === 'once' ? 'selected' : ''}>One-time</option><option value="annual" ${g.frequency === 'annual' ? 'selected' : ''}>Annual</option><option value="monthly" ${g.frequency === 'monthly' ? 'selected' : ''}>Monthly</option></select>
-        <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="startAge" value="${g.startAge || 0}" title="Start age" placeholder="Start">
-        <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="endAge" value="${g.endAge || 0}" title="End age (for recurring)" placeholder="End">
-        <div class="control has-suffix"><input type="number" min="0" step="0.1" data-arr="goals" data-idx="${i}" data-key="inflation" data-vtype="percent" value="${g.inflation != null ? g.inflation : ''}" title="Goal inflation (blank = plan default)" placeholder="Infl"><span class="suffix">%</span></div>
-        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="funded" data-money value="${moneyDisplay(g.funded || 0)}" title="Already saved"></div>
-        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="monthly" data-money value="${moneyDisplay(g.monthly || 0)}" title="Monthly savings"></div></div>` :
-      `<div style="grid-column:1/-1;display:grid;grid-template-columns:repeat(4,1fr);gap:.4rem;margin-top:.3rem">
-        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(g.amount || 0)}" title="${g.type === 'education' ? 'Annual cost (today)' : 'Goal amount (today)'}"></div>
-        <input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="years" value="${g.years || 0}" title="Years until" placeholder="Yrs">
-        ${g.type === 'education' ? `<input type="number" min="1" data-arr="goals" data-idx="${i}" data-key="duration" value="${g.duration || 4}" title="Years of school" placeholder="Dur">` :
-          `<div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="funded" data-money value="${moneyDisplay(g.funded || 0)}" title="Already saved"></div>`}
-        <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="monthly" data-money value="${moneyDisplay(g.monthly || 0)}" title="Monthly savings"></div>
-      </div>`}</div>`;
+  const isLegacy = g.type === 'legacy', isCustom = g.type === 'custom', isEdu = g.type === 'education';
+  const M = (label, key) => `<div class="rr-cell"><label>${label}</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="goals" data-idx="${i}" data-key="${key}" data-money value="${moneyDisplay(g[key] || 0)}"></div></div>`;
+  const N = (label, key, def) => `<div class="rr-cell"><label>${label}</label><input type="number" min="0" data-arr="goals" data-idx="${i}" data-key="${key}" value="${g[key] != null && g[key] !== '' ? g[key] : (def != null ? def : '')}"></div>`;
+  const grid = inner => `<div class="rr-grid">${inner}</div>`;
+  let body;
+  if (isMgmt) body = `<div class="rr-note">Calculated automatically from your Retirement &amp; Protection inputs — nothing to enter here.</div>`;
+  else if (isLegacy) body = grid(M('Legacy target ($)', 'amount')) + `<div class="rr-note">Measured against your projected estate (ending portfolio).</div>`;
+  else if (isCustom) body = grid(
+      M('Amount each time ($)', 'amount') +
+      `<div class="rr-cell"><label>How often</label><select data-arr="goals" data-idx="${i}" data-key="frequency" data-vtype="text"><option value="once" ${(g.frequency || 'once') === 'once' ? 'selected' : ''}>One-time</option><option value="annual" ${g.frequency === 'annual' ? 'selected' : ''}>Every year</option><option value="monthly" ${g.frequency === 'monthly' ? 'selected' : ''}>Every month</option></select></div>` +
+      N('Start age', 'startAge') + N('End age', 'endAge') +
+      `<div class="rr-cell"><label>Inflation / yr</label><div class="control has-suffix"><input type="number" min="0" step="0.1" data-arr="goals" data-idx="${i}" data-key="inflation" data-vtype="percent" value="${g.inflation != null ? g.inflation : ''}" placeholder="plan"><span class="suffix">%</span></div></div>` +
+      M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'));
+  else if (isEdu) body = grid(M('Annual cost ($)', 'amount') + N('Years until', 'years') + N('Years of school', 'duration', 4) + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'));
+  else body = grid(M('Goal amount ($)', 'amount') + N('Years until', 'years') + M('Already saved ($)', 'funded') + M('Saving / month ($)', 'monthly'));
+  return `<div class="repeat-row" style="grid-template-columns:1fr 160px 26px">
+      <div class="rr-cell"><label>Goal name</label><input type="text" data-arr="goals" data-idx="${i}" data-key="name" value="${escapeAttr(g.name)}" placeholder="e.g. New car"></div>
+      <div class="rr-cell"><label>Goal type</label><select data-arr="goals" data-idx="${i}" data-key="type">${GOAL_TYPES.map(([v, l]) => `<option value="${v}" ${v === g.type ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+      <button class="rr-del" data-action="del-goal" data-idx="${i}" title="Remove" style="align-self:end">×</button>
+      ${body}</div>`;
 }
 
 const EVENT_TYPES = [['child', 'Child / dependent'], ['college', 'College funding'], ['expenseRecurring', 'Recurring expense'], ['income', 'Extra income'], ['expense', 'One-time expense'], ['windfall', 'Windfall / inheritance'], ['ltc', 'Long-term care'], ['downturn', 'Market downturn'], ['mortgagePayoff', 'Pay off mortgage'], ['sellAsset', 'Sell asset / downsize'], ['annuity', 'Buy income annuity']];
 function eventRow(ev, i) {
   const recurring = ['child', 'college', 'ltc', 'income', 'expenseRecurring'].includes(ev.type);
   const oneTime = ['expense', 'windfall'].includes(ev.type);
-  const isDown = ev.type === 'downturn', isPayoff = ev.type === 'mortgagePayoff';
-  const isSell = ev.type === 'sellAsset', isAnnuity = ev.type === 'annuity';
+  const isDown = ev.type === 'downturn', isSell = ev.type === 'sellAsset', isAnnuity = ev.type === 'annuity';
+  const M = (label, key) => `<div class="rr-cell"><label>${label}</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="${key}" data-money value="${moneyDisplay(ev[key] || 0)}"></div></div>`;
+  const N = (label, key, def) => `<div class="rr-cell"><label>${label}</label><input type="number" min="0" data-arr="events" data-idx="${i}" data-key="${key}" value="${ev[key] != null && ev[key] !== '' ? ev[key] : (def != null ? def : '')}"></div>`;
   let fields;
-  if (recurring) fields = `
-    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="startAge" value="${ev.startAge || 0}" title="Begins at client age" placeholder="Age">
-    <input type="number" min="1" data-arr="events" data-idx="${i}" data-key="years" value="${ev.years || 1}" title="For how many years" placeholder="Yrs">
-    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Amount per year (today's $)"></div>`;
-  else if (oneTime) fields = `
-    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
-    <div class="control has-prefix" style="grid-column:span 2"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Amount (today's $)"></div>`;
-  else if (isDown) fields = `
-    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
-    <div class="control has-suffix" style="grid-column:span 2"><input type="number" min="0" max="90" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="percent" value="${ev.amount || 0}" title="One-year portfolio decline"><span class="suffix">% drop</span></div>`;
-  else if (isSell) fields = `
-    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
-    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Net proceeds into the portfolio"></div>
-    <div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="cut" data-money value="${moneyDisplay(ev.cut || 0)}" title="Ongoing spending reduction (downsizing)"></div>`;
-  else if (isAnnuity) fields = `
-    <input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age">
-    <div class="control has-prefix" style="grid-column:span 2"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="events" data-idx="${i}" data-key="amount" data-money value="${moneyDisplay(ev.amount || 0)}" title="Premium → guaranteed lifetime income"></div>`;
-  else fields = `<input type="number" min="0" data-arr="events" data-idx="${i}" data-key="atAge" value="${ev.atAge || 0}" title="At client age" placeholder="Age"><div style="grid-column:span 2;font-size:.72rem;color:var(--faint);align-self:center">Remaining mortgage paid from savings</div>`;
+  if (recurring) fields = N('Begins at age', 'startAge') + N('For how many years', 'years', 1) + M('Amount / year', 'amount');
+  else if (oneTime) fields = N('At age', 'atAge') + M('Amount', 'amount');
+  else if (isDown) fields = N('At age', 'atAge') + `<div class="rr-cell"><label>Portfolio drop</label><div class="control has-suffix"><input type="number" min="0" max="90" data-arr="events" data-idx="${i}" data-key="amount" data-vtype="percent" value="${ev.amount || 0}"><span class="suffix">%</span></div></div>`;
+  else if (isSell) fields = N('At age', 'atAge') + M('Proceeds', 'amount') + M('Expense cut / yr', 'cut');
+  else if (isAnnuity) fields = N('Buy at age', 'atAge') + M('Premium (→ lifetime income)', 'amount');
+  else fields = N('At age', 'atAge') + `<div class="rr-cell" style="align-self:end"><div class="rr-note" style="margin:0">Remaining mortgage paid from savings</div></div>`;
   return `<div class="repeat-row" style="grid-template-columns:1fr 26px">
-    <input type="text" data-arr="events" data-idx="${i}" data-key="label" value="${escapeAttr(ev.label || '')}" placeholder="Event name">
-    <button class="rr-del" data-action="del-event" data-idx="${i}" title="Remove">×</button>
-    <select style="grid-column:1/-1" data-arr="events" data-idx="${i}" data-key="type">${EVENT_TYPES.map(([v, l]) => `<option value="${v}" ${v === ev.type ? 'selected' : ''}>${l}</option>`).join('')}</select>
-    <div style="grid-column:1/-1;display:grid;grid-template-columns:1fr 1fr 1fr;gap:.4rem">${fields}</div></div>`;
+    <div class="rr-cell"><label>Event name</label><input type="text" data-arr="events" data-idx="${i}" data-key="label" value="${escapeAttr(ev.label || '')}" placeholder="e.g. Buy a boat"></div>
+    <button class="rr-del" data-action="del-event" data-idx="${i}" title="Remove" style="align-self:end">×</button>
+    <div class="rr-cell" style="grid-column:1/-1"><label>What kind of event</label><select data-arr="events" data-idx="${i}" data-key="type">${EVENT_TYPES.map(([v, l]) => `<option value="${v}" ${v === ev.type ? 'selected' : ''}>${l}</option>`).join('')}</select></div>
+    <div class="rr-grid" style="grid-column:1/-1">${fields}</div></div>`;
 }
 
 /* ----------------------------- save / plans ------------------------------- */
@@ -1186,6 +1207,13 @@ function netWorthTable(R) {
 
 /* ----------------------------- DASHBOARD ---------------------------------- */
 let dashAge = null;
+let dashWin = null;   // timeline zoom: null = full plan, else { start, years }
+function dashWinRange(R) {
+  if (!dashWin) return { lo: R.curAge, hi: R.endAge, full: true };
+  const lo = clamp(Math.round(+dashWin.start || R.curAge), R.curAge, R.endAge - 1);
+  const hi = clamp(lo + Math.max(1, Math.round(+dashWin.years || 10)), lo + 1, R.endAge);
+  return { lo, hi, full: false };
+}
 const eventTypeLabel = t => (EVENT_TYPES.find(e => e[0] === t) || [, 'Event'])[1];
 function heroAges(R) {
   const c = STATE.household.client, sp = STATE.household.spouse;
@@ -1274,13 +1302,24 @@ function comparePanel() {
     + `<div style="height:1.3rem"></div>`;
 }
 function dashTimeline(R) {
+  const win = dashWinRange(R), yrsVal = win.hi - win.lo;
+  const retInWin = R.retAge >= win.lo && R.retAge <= win.hi;
   return `<div class="timeline">
     <div class="tl-main">
-      <div class="tl-main-head"><h3>Plan Timeline</h3><span class="ph-sub">Drag to walk through every year</span></div>
+      <div class="tl-main-head"><h3>Plan Timeline</h3>
+        <div class="tl-win">
+          <span class="tlw-label">Show</span>
+          <button class="seg-btn ${win.full ? 'on' : ''}" data-dashwin="full">Full</button>
+          <button class="seg-btn ${!win.full && yrsVal === 10 ? 'on' : ''}" data-dashwin="10">10 yr</button>
+          <button class="seg-btn ${!win.full && yrsVal === 20 ? 'on' : ''}" data-dashwin="20">20 yr</button>
+          <span class="tlw-edit">age <input type="number" class="tlw-num" min="${R.curAge}" max="${R.endAge}" value="${win.lo}" data-dashwin-from aria-label="From age"> for <input type="number" class="tlw-num" min="1" max="${R.endAge - R.curAge}" value="${yrsVal}" data-dashwin-years aria-label="Years to show"> yrs</span>
+        </div>
+      </div>
       <div class="tl-chart-wrap" id="tlChart"></div>
+      <div id="tlWinSum"></div>
       <div class="scrubber-wrap">
-        <input type="range" class="scrubber" min="${R.curAge}" max="${R.endAge}" step="1" value="${dashAge}" data-scrub aria-label="Select year">
-        <div class="scrub-ticks"><span>Age ${R.curAge}</span><span>${R.alreadyRetired ? 'Now ' + R.curAge : 'Retire ' + R.retAge}</span><span>Age ${R.endAge}</span></div>
+        <input type="range" class="scrubber" min="${win.lo}" max="${win.hi}" step="1" value="${clamp(dashAge == null ? R.retAge : dashAge, win.lo, win.hi)}" data-scrub aria-label="Select year">
+        <div class="scrub-ticks"><span>Age ${win.lo}</span><span>${R.alreadyRetired && win.full ? 'Now ' + R.curAge : (retInWin ? 'Retire ' + R.retAge : '')}</span><span>Age ${win.hi}</span></div>
         <div class="scrub-hint" id="tlHint"></div>
       </div>
     </div>
@@ -1288,9 +1327,28 @@ function dashTimeline(R) {
   </div>`;
 }
 function updateDashScrub() {
-  const R = RESULTS, row = R.rows.find(r => r.age === dashAge) || R.rows[0]; if (!row) return;
+  const R = RESULTS, win = dashWinRange(R);
+  if (dashAge == null || dashAge < win.lo || dashAge > win.hi) dashAge = clamp(dashAge == null ? R.retAge : dashAge, win.lo, win.hi);
+  const row = R.rows.find(r => r.age === dashAge) || R.rows[0]; if (!row) return;
+  const scr = $('.scrubber'); if (scr) { scr.min = win.lo; scr.max = win.hi; if (+scr.value !== dashAge) scr.value = dashAge; }
   const chart = $('#tlChart');
-  if (chart) chart.innerHTML = lineChart([portfolioSeries(R)], { markers: [{ x: R.retAge, label: 'Retire' }], highlight: { x: dashAge, y: row.end }, h: 248 });
+  const pts = R.rows.filter(r => r.age >= win.lo && r.age <= win.hi).map(r => ({ x: r.age, y: r.end }));
+  const markers = (R.retAge >= win.lo && R.retAge <= win.hi) ? [{ x: R.retAge, label: 'Retire' }] : [];
+  if (chart) chart.innerHTML = lineChart([{ name: 'Portfolio', color: 'var(--gold)', fill: 'var(--gold)', points: pts }],
+    { xMin: win.lo, xMax: win.hi, markers, highlight: { x: dashAge, y: row.end }, h: 248, xticks: Math.min(8, Math.max(2, win.hi - win.lo)) });
+  const winSum = $('#tlWinSum');
+  if (winSum) {
+    const wr = R.rows.filter(r => r.age >= win.lo && r.age <= win.hi), s0 = wr[0], s1 = wr[wr.length - 1];
+    const dV = s1.end - s0.end, sum = k => wr.reduce((a, r) => a + (r[k] || 0), 0);
+    winSum.innerHTML = `<div class="tl-winsum">
+      <div class="tws-cell"><span>${win.full ? 'Full plan' : 'Selected period'}</span><b>Ages ${win.lo}–${win.hi} · ${wr.length} yrs</b></div>
+      <div class="tws-cell"><span>Portfolio ${win.full ? 'at end' : 'start → end'}</span><b class="amount">${win.full ? fmt$(s1.end) : fmt$(s0.end) + ' → ' + fmt$(s1.end)}</b></div>
+      <div class="tws-cell"><span>Change</span><b class="amount ${dV >= 0 ? 'pos' : 'neg'}">${dV >= 0 ? '+' : '−'}${fmt$(Math.abs(dV))}</b></div>
+      <div class="tws-cell"><span>Taxes (period)</span><b class="amount">${fmt$(sum('taxes'))}</b></div>
+      <div class="tws-cell"><span>Contributions</span><b class="amount">${fmt$(sum('contribution'))}</b></div>
+      <div class="tws-cell"><span>Withdrawals</span><b class="amount">${fmt$(sum('withdrawal'))}</b></div>
+    </div>`;
+  }
   const comp = [
     { label: 'Wages', value: row.wages || 0, color: 'var(--gold)' },
     { label: 'Social Security', value: row.ss || 0, color: 'var(--ink)' },
@@ -1423,6 +1481,7 @@ function liveProfile() {
     `, { sub: 'Live' }) +
     `<div style="height:1rem"></div>` +
     budgetSnapshot(R) +
+    savingsByAccountPanel(R) +
     `<div style="height:1rem"></div>` +
     panel('Net Worth', netWorthTable(R));
 }
@@ -1450,6 +1509,29 @@ function budgetSnapshot(R) {
     <div class="cf-bd-list">${list}</div>
     ${mDebt > 0 ? `<p class="budget-note" style="margin-top:.55rem"><b>${fmt$(mDebt)}/mo</b> of loan payments (from ${liabs.length} liabilit${liabs.length === 1 ? 'y' : 'ies'}) are added on top of living expenses — your mortgage belongs in Liabilities, not the budget above.</p>` : '<p class="budget-note" style="margin-top:.55rem">No liabilities entered. Add a mortgage or loan in the Liabilities section and its payment flows in here automatically.</p>'}
   `, { sub: 'Where the money goes', hideKey: 'prof-budget' });
+}
+function savingsByAccountPanel(R) {
+  if ((STATE.savings || {}).mode !== 'accounts') return '';
+  const accts = (STATE.assets || []).filter(a => CONTRIB_TYPES.includes(a.type) && (+a.contribution || 0) > 0);
+  if (!accts.length) return `<div style="height:1rem"></div>` + panel('Savings by Account', '<div class="empty">Switch an account on and enter a monthly contribution to see your savings broken out here.</div>', { sub: 'By account', hideKey: 'prof-sba' });
+  const cls = t => t === 'roth' ? ['Roth · tax-free', 'good'] : t === 'traditional' ? ['Tax-deferred', 'gold'] : ['Taxable', 'ink'];
+  const grp = { free: 0, def: 0, tax: 0 };
+  accts.forEach(a => { const c = +a.contribution || 0; if (a.type === 'roth') grp.free += c; else if (a.type === 'traditional') grp.def += c; else grp.tax += c; });
+  const totMo = grp.free + grp.def + grp.tax, rate = R.grossIncome > 0 ? (totMo * 12) / R.grossIncome : 0;
+  const target = (+STATE.savings.targetRatePct || 0) / 100;
+  const rows = accts.map(a => { const [l, t] = cls(a.type); return `<div class="cf-bd-row"><span>${escapeHtml(a.name || 'Account')} ${badge(l, t)}</span><b class="amount">${fmt$(+a.contribution || 0)}/mo</b></div>`; }).join('');
+  const taxRow = (label, v, color) => v > 0 ? `<div class="cf-bd-row"><span><i class="dot" style="background:${color}"></i>${label}</span><b class="amount">${fmt$(v)}/mo</b></div>` : '';
+  const msg = target > 0
+    ? (rate >= target ? `✓ Hitting your ${pct(target * 100, 0)} target — saving ${fmt$(totMo)}/mo (${fmt$(totMo * 12)}/yr).`
+      : `▲ ${pct((target - rate) * 100, 1)} below your ${pct(target * 100, 0)} target — about <b>${fmt$(Math.max(0, (target - rate) * R.grossIncome / 12))}/mo</b> more gets you there.`)
+    : `Saving ${fmt$(totMo)}/mo (${pct(rate * 100, 1)} of income). Set a target rate in the Savings section.`;
+  return `<div style="height:1rem"></div>` + panel('Savings by Account', `
+    ${rows}
+    <div class="section-label">By tax treatment</div>
+    ${taxRow('Tax-free (Roth)', grp.free, 'var(--good)')}${taxRow('Tax-deferred', grp.def, 'var(--gold)')}${taxRow('Taxable', grp.tax, 'var(--ink)')}
+    <div class="section-label">Savings rate</div>
+    ${progressBar(`${pct(rate * 100, 1)} saved${target > 0 ? ` · ${pct(target * 100, 0)} target` : ''}`, target > 0 ? rate / target : rate / 0.15, { tone: (target > 0 ? rate >= target : rate >= 0.15) ? 'good' : rate >= 0.1 ? 'warn' : 'bad' })}
+    <p class="i-action" style="margin-top:.5rem">${msg}</p>`, { sub: 'By account', hideKey: 'prof-sba' });
 }
 
 /* ----------------------------- NEEDS ANALYSIS ----------------------------- */
@@ -2255,7 +2337,7 @@ function handleAction(action, el) {
     case 'duplicate': closePlanMenu(); duplicatePlan(); break;
     case 'export': exportPlan(); break;
     case 'import': $('#importFile').click(); break;
-    case 'add-asset': (STATE.assets = STATE.assets || []).push({ id: uid(), name: '', type: 'taxable', balance: 0 }); rebuildAssets(); recompute(); break;
+    case 'add-asset': (STATE.assets = STATE.assets || []).push({ id: uid(), name: '', type: 'taxable', balance: 0, contribution: 0, growth: '' }); rebuildAssets(); recompute(); break;
     case 'del-asset': STATE.assets.splice(idx, 1); rebuildAssets(); recompute(); break;
     case 'add-liab': (STATE.liabilities = STATE.liabilities || []).push({ id: uid(), name: '', type: 'auto', balance: 0, rate: 6, payment: 0 }); rebuildLiabs(); recompute(); break;
     case 'del-liab': STATE.liabilities.splice(idx, 1); rebuildLiabs(); recompute(); break;
@@ -2339,6 +2421,13 @@ function onInput(e) {
     const k = t.getAttribute('data-surv'); SURVIVOR[k] = k === 'who' ? t.value : (+t.value || 0);
     liveDecision(); return;
   }
+  if (t.matches('[data-dashwin-from]') || t.matches('[data-dashwin-years]')) {
+    const R = RESULTS;
+    if (!dashWin) dashWin = { start: R.curAge, years: R.endAge - R.curAge };
+    if (t.matches('[data-dashwin-from]')) dashWin.start = +t.value || R.curAge;
+    else dashWin.years = Math.max(1, +t.value || 1);
+    updateDashScrub(); return;
+  }
   if (t.matches('[data-scrub]')) { dashAge = +t.value; updateDashScrub(); return; }
 }
 function onClick(e) {
@@ -2350,6 +2439,14 @@ function onClick(e) {
   if (dis) { DISABILITY.on = !DISABILITY.on; dis.setAttribute('aria-checked', String(DISABILITY.on)); liveDecision(); return; }
   const cfb = e.target.closest('[data-cf-break]');
   if (cfb) { toggleCfBreakdown(cfb); return; }
+  const dw = e.target.closest('[data-dashwin]');
+  if (dw) {
+    const v = dw.getAttribute('data-dashwin'), R = RESULTS;
+    if (v === 'full') dashWin = null;
+    else { const start = dashWin ? dashWin.start : (R.retAge || R.curAge); dashWin = { start: clamp(+start || R.curAge, R.curAge, R.endAge - 1), years: +v }; }
+    if (currentView === 'dashboard') (presentMode ? showPresentView('dashboard') : renderDashboard());
+    return;
+  }
   const toggle = e.target.closest('[data-toggle]');
   if (toggle) {
     const p = toggle.getAttribute('data-toggle'), nv = !getPath(STATE, p);
