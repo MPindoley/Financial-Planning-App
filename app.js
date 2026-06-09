@@ -1740,7 +1740,14 @@ function cfBreakdown(r, metric) {
       { label: 'From Roth', value: r.wRoth || 0, color: 'var(--gold-deep)', drill: acctDrill(['roth'], r.bRoth) }
     ] };
   }
-  return { title: 'Portfolio composition', items: [
+  const guar = [];
+  if ((r.pension || 0) > 0.5) guar.push('pension ' + fmt$(r.pension) + '/yr');
+  if ((r.ss || 0) > 0.5) guar.push('Social Security ' + fmt$(r.ss) + '/yr');
+  if ((r.annuity || 0) > 0.5) guar.push('annuity ' + fmt$(r.annuity) + '/yr');
+  const pnote = guar.length
+    ? 'Investable accounts only — your guaranteed income (' + guar.join(', ') + ') pays out as income (see the Income breakdown) and has no account balance, so it isn’t part of the portfolio value.'
+    : 'Investable accounts only — guaranteed income (pension, Social Security, annuities) shows in the Income breakdown, not here; real estate sits in net worth.';
+  return { title: 'Portfolio composition', note: pnote, items: [
     { label: 'Taxable', value: r.bTax || 0, color: 'var(--gold)', drill: acctDrill(['cash', 'taxable', 'other'], r.bTax) },
     { label: 'Tax-deferred', value: r.bDef || 0, color: 'var(--ink)', drill: acctDrill(['traditional'], r.bDef) },
     { label: 'Roth', value: r.bRoth || 0, color: 'var(--gold-deep)', drill: acctDrill(['roth'], r.bRoth) }
@@ -1771,7 +1778,7 @@ function cfBreakdownHTML(r, metric) {
   return `<div class="cf-bd">
     <div class="cf-bd-head">${d.title} · <b class="amount">${fmt$(total)}</b> <span class="cf-bd-year">in ${r.year} (age ${r.age})</span></div>
     <div class="compbar">${bar}</div>
-    <div class="cf-bd-list">${list}</div></div>`;
+    <div class="cf-bd-list">${list}</div>${d.note ? `<p class="budget-note" style="margin-top:.4rem">${d.note}</p>` : ''}</div>`;
 }
 function toggleCfBreakdown(el) {
   const tr = el.closest('tr'); if (!tr) return;
