@@ -89,7 +89,7 @@ function defaultState() {
     income: { clientSalary: 0, spouseSalary: 0, otherIncome: 0, salaryGrowth: 3,
               ssClient: 0, ssSpouse: 0, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 },
     expenses: { annualExpenses: 0, retirementExpensePct: 80, expenseMode: 'simple', budget: { housing: 0, utilities: 0, food: 0, transportation: 0, healthcare: 0, insurance: 0, personal: 0, other: 0 } },
-    savings:  { annualSavings: 0, employerMatch: 0, mode: 'dollar', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0, targetRatePct: 15 },
+    savings:  { annualSavings: 0, employerMatch: 0, mode: 'dollar', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0, targetRatePct: 15, surplusMode: 'invest' },
     savingsSplit: { pretax: 70, roth: 15, taxable: 15 },
     assets: [], liabilities: [],
     insurance: { lifeClient: 0, lifeSpouse: 0 },
@@ -349,6 +349,7 @@ function simulate(S, opts = {}) {
   const pe = S.pensionElection || {};                                // pension survivor-benefit election (joint-and-survivor)
   const pensSurvPct = (+pe.survivorPct || 0) / 100, pensReduction = 1 - 0.15 * pensSurvPct;
   const cs = S.charitableStrategy || {};                             // charitable QCD strategy (off by default)
+  const sweepSurplus = (SV.surplusMode || 'invest') !== 'discretionary';   // invest leftover income, or treat it as discretionary spending
 
   const rows = []; let depletionAge = null, lifetimeTax = 0, lifetimeFedTax = 0, lifetimeStateTax = 0;
 
@@ -472,14 +473,14 @@ function simulate(S, opts = {}) {
     let conversion = rothConversionYear(S, { age, bDef, filing: filingY, inflFac, pension, ss, rmd: rmdHH });
 
     const row = { age, t, year, phase: anyWorking ? 'work' : 'retire', wages, ss, pension, rmd, conversion, expenses, need };
-    let taxes, wT = 0, wD = 0, wR = 0, gain = 0;
+    let taxes, wT = 0, wD = 0, wR = 0, gain = 0, leftover = 0;
 
     if (anyWorking) {
       taxes = computeTax({ wages, pretax: cPretax, pension, taxableInterest: 0, qualDiv, ss, filing: filingY, stateRate, inflFac, isWorking: true });
       bDef += cPretax + match; bRoth += cRoth; bTax += cTaxable + qualDiv; basis += cTaxable + qualDiv;
       if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
       const netCash = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc - taxes.total - need - cPretax - cRoth - cTaxable;
-      if (netCash >= 0) { bTax += netCash; basis += netCash; }
+      if (netCash >= 0) { leftover = netCash; if (sweepSurplus) { bTax += netCash; basis += netCash; } }   // leftover: invest it, or leave it discretionary
       else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
     } else {
@@ -498,7 +499,7 @@ function simulate(S, opts = {}) {
       wT = seq.wTax + 0; wD = seq.wDef + rmdHH; wR = seq.wRoth; gain = seq.gain;
       bTax += qualDiv; basis += qualDiv;
       const surplus = guaranteed + rmdHH - need - taxes.total;
-      if (surplus > 0) { bTax += surplus; basis += surplus; }
+      if (surplus > 0) { leftover = surplus; if (sweepSurplus) { bTax += surplus; basis += surplus; } }   // guaranteed income beyond the need
       if (seq.shortfall > 1 && depletionAge === null) depletionAge = age;
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
     }
@@ -510,11 +511,11 @@ function simulate(S, opts = {}) {
     Object.assign(row, {
       taxes: taxes.total, fed: taxes.fed, state: taxes.state, fica: taxes.fica, agi: taxes.agi,
       taxableIncome: taxes.taxableIncome, ordinaryTaxable: taxes.ordinaryTaxable, marginal: taxes.marginal, ssTaxable: taxes.ssTaxable,
-      contribution: retired ? 0 : (cPretax + cRoth + cTaxable + match), withdrawal: retired ? (wT + wD + wR) : (wT + wD + wR),
+      contribution: cPretax + cRoth + cTaxable + match, withdrawal: wT + wD + wR,
       wTax: wT, wDef: wD, wRoth: wR, bTax, bDef, bRoth, end: portfolio, debt: totalDebt,
-      reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + ss + pension + annuityInc + disabilityInc, annuity: annuityInc, disabilityInc, qcd: qcdAmt,
-      cPretax: retired ? 0 : cPretax, cRoth: retired ? 0 : cRoth, cTaxable: retired ? 0 : cTaxable, match: retired ? 0 : match, debtPay, evOut: ev.out,
-      cumTax: lifetimeTax
+      reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + otherInc + ss + pension + annuityInc + disabilityInc + ev.in, annuity: annuityInc, disabilityInc, otherInc, evIn: ev.in, qcd: qcdAmt,
+      cPretax, cRoth, cTaxable, match, debtPay, evOut: ev.out, goalOut: gOut,
+      savedToAccounts: cPretax + cRoth + cTaxable, leftover, surplusInvested: sweepSurplus, cumTax: lifetimeTax
     });
     rows.push(row);
   }
@@ -1079,7 +1080,9 @@ function savingsBlock() {
     + `<p class="budget-note">Enter the <b>monthly contribution and growth for each account</b> in the Accounts section below — totals, tax treatment, and progress to your target appear in the live panel on the right.</p>`;
   else inputs = fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' }) + split;
   return `<div class="block-head"><span class="block-title">Savings</span>${modeSeg('set-sav-mode', mode, [['percent', '% of income'], ['accounts', 'By account'], ['dollar', '$ per year']])}</div>
-    ${inputs}`;
+    ${inputs}
+    ${sectionLabel('Leftover income (after expenses, taxes &amp; planned savings)')}
+    ${field({ path: 'savings.surplusMode', label: 'Treat the surplus as', type: 'select', options: [{ value: 'invest', label: 'Extra savings — invest it' }, { value: 'discretionary', label: 'Discretionary — free to spend' }] })}`;
 }
 
 const ASSET_TYPES = [['cash', 'Cash / Reserve'], ['taxable', 'Taxable / Brokerage'], ['traditional', 'Tax-Deferred (401k/IRA)'], ['roth', 'Roth'], ['education', 'Education (529)'], ['realestate', 'Real Estate'], ['other', 'Other']];
@@ -1440,8 +1443,10 @@ function updateDashScrub() {
       <div class="tl-row"><span>Portfolio</span><b class="amount big">${fmt$(row.end)}</b></div>
       <div class="tl-row"><span>Net worth</span><b class="amount">${fmt$(row.netWorth)}</b></div>
       <div class="tl-row"><span>Total income</span><b class="amount">${fmt$(totalIn)}</b></div>
-      <div class="tl-row"><span>Spending</span><b class="amount">${fmt$(row.expenses)}</b></div>
+      <div class="tl-row"><span>Spending</span><b class="amount">${fmt$(row.need)}</b></div>
       <div class="tl-row"><span>Taxes</span><b class="amount">${fmt$(row.taxes)}</b></div>
+      <div class="tl-row"><span>${row.phase === 'work' ? 'Saved' : 'Withdrawn'}</span><b class="amount">${fmt$(row.phase === 'work' ? (row.savedToAccounts || 0) : (row.withdrawal || 0))}</b></div>
+      <div class="tl-row"><span>Leftover to spend</span><b class="amount ${(row.leftover || 0) > 0 ? 'pos' : ''}">${fmt$(row.leftover || 0)}</b></div>
     </div>
     <div class="tl-milestone ${ms ? '' : 'none'}"><span class="m-ico">${ms ? '★' : '•'}</span><span>${ms ? ms.join(' · ') : 'A steady year on plan'}</span></div>`;
   const hint = $('#tlHint'); if (hint) hint.innerHTML = `Showing <b>age ${dashAge}</b> · ${row.year} — drag the slider to explore`;
@@ -1684,13 +1689,20 @@ function cfBreakdown(r, metric) {
     { label: 'Social Security', value: r.ss || 0, color: 'var(--ink)' },
     { label: 'Pension', value: r.pension || 0, color: '#7c8aa0' },
     { label: 'Annuity', value: r.annuity || 0, color: 'var(--gold-deep)' },
-    { label: 'Disability', value: r.disabilityInc || 0, color: '#b08968' }
+    { label: 'Disability', value: r.disabilityInc || 0, color: '#b08968' },
+    { label: 'Other income', value: r.otherInc || 0, color: 'var(--good)' },
+    { label: 'Windfall / one-off', value: r.evIn || 0, color: 'var(--gold-2)' }
   ] };
-  if (metric === 'outflow') return { title: 'Where the money goes', items: [
+  if (metric === 'spending') return { title: 'Spending this year', items: [
     { label: 'Living expenses', value: r.expenses || 0, color: 'var(--gold)' },
     { label: 'Debt payments', value: r.debtPay || 0, color: '#b08968' },
-    { label: 'Planned events', value: r.evOut || 0, color: '#7c8aa0' },
-    { label: 'Taxes', value: r.taxes || 0, color: 'var(--ink)' }
+    { label: 'Life-event costs', value: r.evOut || 0, color: '#7c8aa0' },
+    { label: 'Goal spending', value: r.goalOut || 0, color: 'var(--gold-deep)' }
+  ] };
+  if (metric === 'taxes') return { title: 'Taxes this year', items: [
+    { label: 'Federal', value: r.fed || 0, color: 'var(--ink)' },
+    { label: 'State', value: r.state || 0, color: '#7c8aa0' },
+    { label: 'FICA (payroll)', value: r.fica || 0, color: '#b08968' }
   ] };
   if (metric === 'flow') return r.phase === 'work'
     ? { title: 'Savings this year', items: [
@@ -1711,6 +1723,17 @@ function cfBreakdown(r, metric) {
   ] };
 }
 function cfBreakdownHTML(r, metric) {
+  if (metric === 'leftover') {                                         // waterfall: income − taxes − spending − savings (− draws) = leftover
+    const saved = r.phase === 'work' ? (r.savedToAccounts || 0) : 0, draw = r.phase === 'work' ? 0 : (r.withdrawal || 0);
+    const wf = [{ l: 'Income', v: r.income || 0 }, { l: '− Taxes', v: -(r.taxes || 0) }, { l: '− Spending', v: -(r.need || 0) }];
+    if (saved > 0.5) wf.push({ l: '− Saved to accounts', v: -saved });
+    if (draw > 0.5) wf.push({ l: '+ Portfolio withdrawals', v: draw });
+    const list = wf.map(x => `<div class="cf-bd-row"><span>${x.l}</span><b class="amount">${x.v < 0 ? '−' : ''}${fmt$(Math.abs(x.v))}</b></div>`).join('');
+    const note = (r.leftover || 0) < 1 ? 'Income is fully used by spending, taxes and savings this year.' : (r.surplusInvested ? 'Your setting invests this surplus as extra taxable savings.' : 'Discretionary — free to use or spend (not invested).');
+    return `<div class="cf-bd"><div class="cf-bd-head">Left over · <b class="amount">${fmt$(r.leftover || 0)}</b> <span class="cf-bd-year">in ${r.year} (age ${r.age})</span></div>
+      <div class="cf-bd-list">${list}<div class="cf-bd-row cf-bd-total"><span><b>= Left over</b></span><b class="amount">${fmt$(r.leftover || 0)}</b></div></div>
+      <p class="budget-note" style="margin-top:.4rem">${note}</p></div>`;
+  }
   const d = cfBreakdown(r, metric);
   const items = d.items.filter(x => x.value > 0.5);
   const total = items.reduce((s, x) => s + x.value, 0) || 1;
@@ -1743,15 +1766,17 @@ function cashflowTable(R) {
     ? R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge)
     : R.rows;
   const body = rows.map(r => {
-    const flow = r.phase === 'work' ? r.contribution : -r.withdrawal;
+    const flow = r.phase === 'work' ? (r.savedToAccounts || 0) : -(r.withdrawal || 0);
     return `<tr><td>${r.age}</td><td style="text-align:left"><span class="badge ${r.phase === 'work' ? 'gold' : 'ink'}">${r.phase === 'work' ? 'Working' : 'Retired'}</span></td>
       <td class="amount">${cfCell(r.age, 'income', fmtK(r.income))}</td>
-      <td class="amount">${cfCell(r.age, 'outflow', fmtK(r.expenses))}</td>
+      <td class="amount">${cfCell(r.age, 'spending', fmtK(r.need))}</td>
+      <td class="amount">${cfCell(r.age, 'taxes', fmtK(r.taxes))}</td>
       <td class="amount ${flow >= 0 ? 'pos' : 'neg'}">${cfCell(r.age, 'flow', (flow >= 0 ? '+' : '−') + fmtK(Math.abs(flow)))}</td>
+      <td class="amount ${(r.leftover || 0) > 0 ? 'pos' : ''}">${cfCell(r.age, 'leftover', fmtK(r.leftover || 0))}</td>
       <td class="amount">${cfCell(r.age, 'portfolio', fmtK(r.end))}</td></tr>`;
   }).join('');
-  return `<div class="tbl-scroll"><table class="tbl cf-tbl"><thead><tr><th>Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Expenses</th><th>Save / Draw</th><th>Portfolio</th></tr></thead><tbody>${body}</tbody></table>
-    <p class="cf-hint">Tap any amount to see how it breaks down ↓</p></div>`;
+  return `<div class="tbl-scroll"><table class="tbl cf-tbl"><thead><tr><th>Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Spending</th><th>Taxes</th><th>Saved / Drawn</th><th>Leftover</th><th>Portfolio</th></tr></thead><tbody>${body}</tbody></table>
+    <p class="cf-hint">Income − Spending − Taxes − Saved = Leftover. Tap any amount to see how it breaks down ↓</p></div>`;
 }
 function liveCashflow() {
   const R = RESULTS, el = $('#res-cashflow'); if (!el) return;
