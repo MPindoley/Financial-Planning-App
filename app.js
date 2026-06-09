@@ -404,14 +404,16 @@ function simulate(S, opts = {}) {
     });
 
     /* income */
-    let wages = 0;
-    if (clientWorking) wages += (+I.clientSalary || 0) * pow(1 + salg, t);
-    if (spouseWorking) wages += (+I.spouseSalary || 0) * pow(1 + salg, t);
+    let wages = 0, wagesC = 0, wagesS = 0;
+    if (clientWorking) { wagesC = (+I.clientSalary || 0) * pow(1 + salg, t); wages += wagesC; }
+    if (spouseWorking) { wagesS = (+I.spouseSalary || 0) * pow(1 + salg, t); wages += wagesS; }
     const otherInc = anyWorking ? (+I.otherIncome || 0) * g : 0;
     let ss = 0;
     const ssC = (age >= ssClaimC) ? (+I.ssClient || 0) * pow(1 + cola, t) : 0;
     const ssS = (spOn && spNow >= ssClaimS) ? (+I.ssSpouse || 0) * pow(1 + cola, t) : 0;
     ss = (deadClient || deadSpouse) ? Math.max(ssC, ssS) : ssC + ssS;   // survivor keeps the larger benefit
+    let rowSsC = ssC, rowSsS = ssS;                                     // split that actually sums to ss (for the breakdown drill-down)
+    if (deadClient || deadSpouse) { if (ssC >= ssS) { rowSsC = ss; rowSsS = 0; } else { rowSsC = 0; rowSsS = ss; } }
     let pension = retired ? (+I.pension || 0) * g * pensReduction : 0;   // pension election reduces the lifetime benefit
     if (pension > 0 && (deadClient || deadSpouse)) pension *= pensSurvPct; // survivor continuation per the election
     let disabilityInc = 0;                                              // disability income replacement (% of salary, pre-retirement)
@@ -515,7 +517,7 @@ function simulate(S, opts = {}) {
       wTax: wT, wDef: wD, wRoth: wR, bTax, bDef, bRoth, end: portfolio, debt: totalDebt,
       reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + otherInc + ss + pension + annuityInc + disabilityInc + ev.in, annuity: annuityInc, disabilityInc, otherInc, evIn: ev.in, qcd: qcdAmt,
       cPretax, cRoth, cTaxable, match, debtPay, evOut: ev.out, goalOut: gOut,
-      savedToAccounts: cPretax + cRoth + cTaxable, leftover, surplusInvested: sweepSurplus, cumTax: lifetimeTax
+      savedToAccounts: cPretax + cRoth + cTaxable, leftover, surplusInvested: sweepSurplus, wagesC, wagesS, ssC: rowSsC, ssS: rowSsS, cumTax: lifetimeTax
     });
     rows.push(row);
   }
@@ -1684,42 +1686,64 @@ function cfCell(age, metric, inner) {
   return `<button class="cf-cell" data-cf-break="${metric}" data-cf-age="${age}" aria-expanded="false" title="See the breakdown">${inner}</button>`;
 }
 function cfBreakdown(r, metric) {
+  const A = STATE.assumptions, infl = (+A.inflation || 0) / 100, g = pow(1 + infl, r.t || 0), curAge = +STATE.household.client.age || 0;
+  const cn = ((STATE.household.client.name || 'Client').split(' ')[0]) || 'Client';
+  const sn = ((STATE.household.spouse.name || 'Spouse').split(' ')[0]) || 'Spouse', spOn = STATE.household.spouse.included;
+  const dl = arr => { const f = arr.filter(x => x.v > 0.5); return f.length ? f.map(x => `<div class="cf-drill-row"><span>${x.l}</span><b class="amount">${fmt$(x.v)}${x.pct != null ? ' · ' + pct(x.pct, 0) + ' of portfolio' : ''}</b></div>`).join('') : '<div class="cf-drill-row"><span style="color:var(--faint)">No detail to break out</span></div>'; };
+  const acctDrill = (types, bucketVal) => {                            // named accounts in a tax bucket + each one's estimated % of the total portfolio
+    const accts = (STATE.assets || []).filter(a => types.includes(a.type));
+    const initSum = accts.reduce((s, a) => s + (+a.balance || 0), 0), total = r.end || 1;
+    if (!accts.length) return bucketVal > 1 ? dl([{ l: 'Accumulated savings (no named account)', v: bucketVal, pct: bucketVal / total * 100 }]) : dl([]);
+    return dl(accts.map(a => { const share = initSum > 0 ? (+a.balance || 0) / initSum : 1 / accts.length; const v = bucketVal * share; return { l: escapeHtml(a.name || '(unnamed account)'), v, pct: v / total * 100 }; }));
+  };
   if (metric === 'income') return { title: 'Income sources', items: [
-    { label: 'Wages / earned', value: r.wages || 0, color: 'var(--gold)' },
-    { label: 'Social Security', value: r.ss || 0, color: 'var(--ink)' },
+    { label: 'Wages / earned', value: r.wages || 0, color: 'var(--gold)', drill: dl([{ l: cn, v: r.wagesC || 0 }].concat(spOn ? [{ l: sn, v: r.wagesS || 0 }] : [])) },
+    { label: 'Social Security', value: r.ss || 0, color: 'var(--ink)', drill: dl([{ l: cn, v: r.ssC || 0 }].concat(spOn ? [{ l: sn, v: r.ssS || 0 }] : [])) },
     { label: 'Pension', value: r.pension || 0, color: '#7c8aa0' },
     { label: 'Annuity', value: r.annuity || 0, color: 'var(--gold-deep)' },
     { label: 'Disability', value: r.disabilityInc || 0, color: '#b08968' },
     { label: 'Other income', value: r.otherInc || 0, color: 'var(--good)' },
     { label: 'Windfall / one-off', value: r.evIn || 0, color: 'var(--gold-2)' }
   ] };
-  if (metric === 'spending') return { title: 'Spending this year', items: [
-    { label: 'Living expenses', value: r.expenses || 0, color: 'var(--gold)' },
-    { label: 'Debt payments', value: r.debtPay || 0, color: '#b08968' },
-    { label: 'Life-event costs', value: r.evOut || 0, color: '#7c8aa0' },
-    { label: 'Goal spending', value: r.goalOut || 0, color: 'var(--gold-deep)' }
-  ] };
+  if (metric === 'spending') {
+    const detailed = STATE.expenses.expenseMode === 'detailed';
+    const livingDrill = detailed ? dl(EXP_CATS.map(([k, lab]) => ({ l: lab, v: (+STATE.expenses.budget[k] || 0) * 12 * g }))) : '<div class="cf-drill-row"><span style="color:var(--faint)">Single annual figure — switch Expenses to a budget to itemize</span></div>';
+    const debtDrill = dl((STATE.liabilities || []).map(l => ({ l: escapeHtml(l.name || l.type || 'Loan') + ' (' + l.type + ')', v: (+l.payment || 0) * 12 })));
+    const goalDrill = dl((STATE.goals || []).map(go => ({ l: escapeHtml(go.name || go.type), v: goalSpendYear([go], r.age, infl, curAge, (+A.eduInflation || 5) / 100) })));
+    const evDrill = dl((STATE.events || []).map(e => ({ l: escapeHtml(e.label || e.type), v: applyEventsYear([e], r.age, r.t || 0, infl).out })));
+    return { title: 'Spending this year', items: [
+      { label: 'Living expenses', value: r.expenses || 0, color: 'var(--gold)', drill: livingDrill },
+      { label: 'Debt payments', value: r.debtPay || 0, color: '#b08968', drill: debtDrill },
+      { label: 'Life-event costs', value: r.evOut || 0, color: '#7c8aa0', drill: evDrill },
+      { label: 'Goal spending', value: r.goalOut || 0, color: 'var(--gold-deep)', drill: goalDrill }
+    ] };
+  }
   if (metric === 'taxes') return { title: 'Taxes this year', items: [
     { label: 'Federal', value: r.fed || 0, color: 'var(--ink)' },
     { label: 'State', value: r.state || 0, color: '#7c8aa0' },
     { label: 'FICA (payroll)', value: r.fica || 0, color: '#b08968' }
   ] };
-  if (metric === 'flow') return r.phase === 'work'
-    ? { title: 'Savings this year', items: [
-        { label: 'Pre-tax (401k / IRA)', value: r.cPretax || 0, color: 'var(--gold)' },
-        { label: 'Roth', value: r.cRoth || 0, color: 'var(--gold-deep)' },
-        { label: 'Taxable', value: r.cTaxable || 0, color: '#7c8aa0' },
+  if (metric === 'flow') {
+    if (r.phase === 'work') {
+      const acctMode = STATE.savings.mode === 'accounts', sg = pow(1 + ((+STATE.income.salaryGrowth || 0) / 100), r.t || 0);
+      const byType = types => dl((STATE.assets || []).filter(a => types.includes(a.type) && (+a.contribution || 0) > 0).map(a => ({ l: escapeHtml(a.name || '(account)'), v: (+a.contribution || 0) * 12 * sg })));
+      return { title: 'Savings this year', items: [
+        { label: 'Pre-tax (401k / IRA)', value: r.cPretax || 0, color: 'var(--gold)', drill: acctMode ? byType(['traditional']) : undefined },
+        { label: 'Roth', value: r.cRoth || 0, color: 'var(--gold-deep)', drill: acctMode ? byType(['roth']) : undefined },
+        { label: 'Taxable', value: r.cTaxable || 0, color: '#7c8aa0', drill: acctMode ? byType(['cash', 'taxable', 'other']) : undefined },
         { label: 'Employer match', value: r.match || 0, color: 'var(--good)' }
-      ] }
-    : { title: 'Withdrawals this year', items: [
-        { label: 'From taxable', value: r.wTax || 0, color: 'var(--gold)' },
-        { label: 'From tax-deferred', value: r.wDef || 0, color: 'var(--ink)' },
-        { label: 'From Roth', value: r.wRoth || 0, color: 'var(--gold-deep)' }
       ] };
+    }
+    return { title: 'Withdrawals this year', items: [
+      { label: 'From taxable', value: r.wTax || 0, color: 'var(--gold)', drill: acctDrill(['cash', 'taxable', 'other'], r.bTax) },
+      { label: 'From tax-deferred', value: r.wDef || 0, color: 'var(--ink)', drill: acctDrill(['traditional'], r.bDef) },
+      { label: 'From Roth', value: r.wRoth || 0, color: 'var(--gold-deep)', drill: acctDrill(['roth'], r.bRoth) }
+    ] };
+  }
   return { title: 'Portfolio composition', items: [
-    { label: 'Taxable', value: r.bTax || 0, color: 'var(--gold)' },
-    { label: 'Tax-deferred', value: r.bDef || 0, color: 'var(--ink)' },
-    { label: 'Roth', value: r.bRoth || 0, color: 'var(--gold-deep)' }
+    { label: 'Taxable', value: r.bTax || 0, color: 'var(--gold)', drill: acctDrill(['cash', 'taxable', 'other'], r.bTax) },
+    { label: 'Tax-deferred', value: r.bDef || 0, color: 'var(--ink)', drill: acctDrill(['traditional'], r.bDef) },
+    { label: 'Roth', value: r.bRoth || 0, color: 'var(--gold-deep)', drill: acctDrill(['roth'], r.bRoth) }
   ] };
 }
 function cfBreakdownHTML(r, metric) {
@@ -1740,7 +1764,10 @@ function cfBreakdownHTML(r, metric) {
   const bar = items.length
     ? items.map(x => `<i style="width:${(x.value / total * 100).toFixed(1)}%;background:${x.color}" title="${escapeAttr(x.label)}"></i>`).join('')
     : '<i style="width:100%;background:var(--ivory-2)"></i>';
-  const list = items.map(x => `<div class="cf-bd-row"><span><i class="dot" style="background:${x.color}"></i>${x.label}</span><b class="amount">${fmt$(x.value)} · ${pct(x.value / total * 100, 0)}</b></div>`).join('') || '<span style="color:var(--faint)">No components this year.</span>';
+  const list = items.map(x => {
+    const rowHtml = `<div class="cf-bd-row"><span><i class="dot" style="background:${x.color}"></i>${x.label}${x.drill ? '<span class="cf-more" aria-hidden="true">›</span>' : ''}</span><b class="amount">${fmt$(x.value)} · ${pct(x.value / total * 100, 0)}</b></div>`;
+    return x.drill ? `<div class="cf-drill-host" tabindex="0" title="Hover or tap for the detail">${rowHtml}<div class="cf-drill">${x.drill}</div></div>` : rowHtml;
+  }).join('') || '<span style="color:var(--faint)">No components this year.</span>';
   return `<div class="cf-bd">
     <div class="cf-bd-head">${d.title} · <b class="amount">${fmt$(total)}</b> <span class="cf-bd-year">in ${r.year} (age ${r.age})</span></div>
     <div class="compbar">${bar}</div>

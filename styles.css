@@ -372,7 +372,13 @@ body.present .advisor-only{display:none !important}
 .cf-bd-head b{color:var(--ink)}
 .cf-bd-year{color:var(--faint)}
 .cf-bd .compbar{height:16px;margin:.45rem 0 .4rem}
-.cf-bd-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:.08rem .9rem}
+.cf-bd-list{display:flex;flex-direction:column;gap:.04rem}
+.cf-drill-host{outline:none;border-radius:6px}
+.cf-drill-host:hover,.cf-drill-host:focus,.cf-drill-host:focus-within{background:var(--paper)}
+.cf-more{color:var(--gold-deep);font-weight:700;margin-left:.3rem;font-size:.85rem}
+.cf-drill{display:none;margin:.05rem 0 .35rem 1.05rem;padding:.25rem .55rem;border-left:2px solid var(--line-2)}
+.cf-drill-host:hover>.cf-drill,.cf-drill-host:focus>.cf-drill,.cf-drill-host:focus-within>.cf-drill{display:block}
+.cf-drill-row{display:flex;justify-content:space-between;gap:.7rem;font-size:.72rem;color:var(--muted);padding:.03rem 0}
 .cf-bd-row{display:flex;justify-content:space-between;align-items:center;gap:.6rem;font-size:.74rem;color:var(--muted);padding:.05rem 0}
 .cf-bd-row .dot{width:.55rem;height:.55rem;flex:0 0 auto}
 .cf-bd-total{border-top:1px solid var(--line);margin-top:.25rem;padding-top:.25rem}
