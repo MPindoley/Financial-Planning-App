@@ -171,6 +171,7 @@ function planLabel(st) { return (st.household?.client?.name || '').trim() || 'Ne
 const TAX = {
   baseYear: 2026,
   std: { married: 32200, single: 16100, hoh: 24150 },
+  extraStd65: { married: 1650, single: 2050, hoh: 2050 },   /* additional standard deduction per 65+ filer (2026 est.) */
   brackets: {
     married: [[0, .10], [24800, .12], [100800, .22], [211100, .24], [402500, .32], [511300, .35], [767000, .37]],
     single:  [[0, .10], [12400, .12], [50400, .22], [105700, .24], [201775, .32], [256225, .35], [640600, .37]],
@@ -228,9 +229,9 @@ function computeTax(o) {
   const f = o.inflFac || 1;
   const brackets = TAX.brackets[filing].map(([lo, r]) => [lo * f, r]);
   const ltcgBr = TAX.ltcg[filing].map(([lo, r]) => [lo * f, r]);
-  const std = TAX.std[filing] * f;
+  const std = (TAX.std[filing] + (+o.seniors || 0) * (TAX.extraStd65[filing] || 0)) * f;   // 65+ filers get the extra standard deduction
   const wages = +o.wages || 0, pretax = +o.pretax || 0;
-  const ordinaryGross = Math.max(0, wages - pretax) + (+o.pension || 0) + (+o.taxableInterest || 0) +
+  const ordinaryGross = Math.max(0, wages - pretax) + (+o.pension || 0) + (+o.taxableInterest || 0) + (+o.otherIncome || 0) +
     (+o.deferredWithdrawal || 0) + (+o.rothConversion || 0);
   const ss = +o.ss || 0, gains = (+o.qualDiv || 0) + (+o.ltcgRealized || 0);
   const ssTaxable = ssTaxablePortion(ss, ordinaryGross + gains, filing);
@@ -243,7 +244,10 @@ function computeTax(o) {
   const stateRate = (+o.stateRate || 0) / 100;
   const state = Math.max(0, agi - std) * stateRate;
   let fica = 0;
-  if (o.isWorking && wages > 0) fica = Math.min(wages, TAX.ficaWageBase * f) * TAX.ficaSS + wages * TAX.ficaMed;
+  if (o.isWorking && wages > 0) {
+    const fw = (o.ficaWages && o.ficaWages.length) ? o.ficaWages : [wages];   // per-earner: each worker has their own SS wage-base cap
+    fw.forEach(w => { if (w > 0) fica += Math.min(w, TAX.ficaWageBase * f) * TAX.ficaSS + w * TAX.ficaMed; });
+  }
   return {
     fed, state, fica, total: fed + state + fica, agi, ssTaxable, gains,
     taxableIncome: ordinaryTaxable + gainsTaxable, ordinaryTaxable,
@@ -325,14 +329,15 @@ function simulate(S, opts = {}) {
   const spAge0 = +sp.age || curAge, spRet = +sp.retireAge || 65, spLife = +sp.lifeExpectancy || life;
   const endAge = Math.max(life, spOn ? spLife : life);
   const rmdAge = +A.rmdStartAge || 73;
-  const ssClaimC = +I.ssClaimClient || clientRet, ssClaimS = +I.ssClaimSpouse || spRet;
+  const ssClaimC = clamp(+I.ssClaimClient || clientRet, 62, 70), ssClaimS = clamp(+I.ssClaimSpouse || spRet, 62, 70);
+  const ssFacC = ssFactor(ssClaimC), ssFacS = ssFactor(ssClaimS);   // entered benefit = FRA-67 amount; claiming early/late scales it (~70% at 62 … 124% at 70)
   const curYear = new Date().getFullYear();
 
   const by = {}; (S.assets || []).forEach(a => by[a.type] = (by[a.type] || 0) + (+a.balance || 0));
   let bTax = (by.cash || 0) + (by.taxable || 0) + (by.other || 0);
   let bDef = (by.traditional || 0), bRoth = (by.roth || 0);
   let basis = ((A.taxableBasisPct != null ? +A.taxableBasisPct : 60) / 100) * bTax;
-  let reStatic = by.realestate || 0; const eduStatic = by.education || 0;
+  let reStatic = by.realestate || 0; let eduBal = by.education || 0;   // education savings grow and are drawn for tuition
   const homeBuys = (S.goals || []).filter(gg => gg.type === 'home' && +gg.buyAge > 0);   // future home purchases modeled in the projection
 
   const split = S.savingsSplit || { pretax: 70, roth: 15, taxable: 15 };
@@ -375,6 +380,7 @@ function simulate(S, opts = {}) {
     }
     const clientWorking = age < clientRet && !deadClient && !disClient, spouseWorking = spOn && spNow < spRet && !deadSpouse && !disSpouse, anyWorking = clientWorking || spouseWorking;
     const retired = age >= clientRet;
+    const seniors = ((age >= 65 && !deadClient) ? 1 : 0) + ((spOn && spNow >= 65 && !deadSpouse) ? 1 : 0);   // 65+ filers → extra standard deduction
     const growRate = opts.sampleReturn ? opts.sampleReturn(retired) : (retired ? post : pre);
 
     /* one-time balance/debt events */
@@ -409,8 +415,8 @@ function simulate(S, opts = {}) {
     if (spouseWorking) { wagesS = (+I.spouseSalary || 0) * pow(1 + salg, t); wages += wagesS; }
     const otherInc = anyWorking ? (+I.otherIncome || 0) * g : 0;
     let ss = 0;
-    const ssC = (age >= ssClaimC) ? (+I.ssClient || 0) * pow(1 + cola, t) : 0;
-    const ssS = (spOn && spNow >= ssClaimS) ? (+I.ssSpouse || 0) * pow(1 + cola, t) : 0;
+    const ssC = (age >= ssClaimC) ? (+I.ssClient || 0) * ssFacC * pow(1 + cola, t) : 0;
+    const ssS = (spOn && spNow >= ssClaimS) ? (+I.ssSpouse || 0) * ssFacS * pow(1 + cola, t) : 0;
     ss = (deadClient || deadSpouse) ? Math.max(ssC, ssS) : ssC + ssS;   // survivor keeps the larger benefit
     let rowSsC = ssC, rowSsS = ssS;                                     // split that actually sums to ss (for the breakdown drill-down)
     if (deadClient || deadSpouse) { if (ssC >= ssS) { rowSsC = ss; rowSsS = 0; } else { rowSsC = 0; rowSsS = ss; } }
@@ -466,8 +472,14 @@ function simulate(S, opts = {}) {
       if (e.type === 'annuity' && age >= a0) annuityInc += (+e.amount || 0) * pow(1 + infl, Math.max(0, a0 - curAge)) * annuityRate(a0);
       if (e.type === 'sellAsset' && age >= a0) expenseCut += (+e.cut || 0) * g;
     });
-    const gOut = goalSpendYear(S.goals, age, infl, curAge, eduI);     // education / LTC / recurring goal spend on the timeline
-    const need = Math.max(0, expenses - expenseCut) + debtPay + ev.out + gOut;
+    const gOutAll = goalSpendYear(S.goals, age, infl, curAge, eduI);  // education / LTC / recurring goal spend on the timeline
+    const gOutEdu = goalSpendYear((S.goals || []).filter(gg => gg.type === 'education'), age, infl, curAge, eduI);
+    const evCollege = applyEventsYear(events.filter(e2 => e2.type === 'college'), age, t, infl).out;
+    const eduGross = gOutEdu + evCollege, eduDraw = Math.min(eduBal, eduGross);   // tuition is paid from 529/education savings first
+    eduBal -= eduDraw;
+    const eduK = eduGross > 0 ? (eduGross - eduDraw) / eduGross : 1;  // only the uncovered share hits household cash flow
+    const gOut = gOutAll - gOutEdu + gOutEdu * eduK, evOutNet = ev.out - evCollege + evCollege * eduK;
+    const need = Math.max(0, expenses - expenseCut) + debtPay + evOutNet + gOut;
 
     let rmd = (age >= rmdAge && bDef > 0) ? bDef / rmdDivisor(age) : 0;
     const qcdAmt = (cs.on && retired && age >= rmdAge && bDef > 0) ? Math.min((+cs.qcd || 0) * g, rmd, bDef) : 0;   // QCD satisfies RMD tax-free
@@ -478,10 +490,11 @@ function simulate(S, opts = {}) {
     let taxes, wT = 0, wD = 0, wR = 0, gain = 0, leftover = 0;
 
     if (anyWorking) {
-      taxes = computeTax({ wages, pretax: cPretax, pension, taxableInterest: 0, qualDiv, ss, filing: filingY, stateRate, inflFac, isWorking: true });
       bDef += cPretax + match; bRoth += cRoth; bTax += cTaxable + qualDiv; basis += cTaxable + qualDiv;
+      bDef -= rmd;                                                     // RMDs are mandatory even while a (younger) spouse still works
       if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
-      const netCash = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc - taxes.total - need - cPretax - cRoth - cTaxable;
+      taxes = computeTax({ wages, pretax: cPretax, pension, otherIncome: otherInc, taxableInterest: 0, qualDiv, ss, deferredWithdrawal: rmdHH + conversion, filing: filingY, stateRate, inflFac, isWorking: true, ficaWages: [wagesC, wagesS], seniors });
+      const netCash = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc + rmdHH - taxes.total - need - cPretax - cRoth - cTaxable;
       if (netCash >= 0) { leftover = netCash; if (sweepSurplus) { bTax += netCash; basis += netCash; } }   // leftover: invest it, or leave it discretionary
       else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
@@ -491,12 +504,12 @@ function simulate(S, opts = {}) {
       const guaranteed = ss + pension + ev.in + annuityInc + disabilityInc;
       let W = Math.max(0, need - guaranteed - rmdHH), seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis);
       for (let i = 0; i < 8; i++) {
-        const tx = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false });
+        const tx = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false, seniors });
         const newW = Math.max(0, need - guaranteed - rmdHH + tx.total);
         seq = sequenceWithdrawals(newW, bTax, bDef, bRoth, basis);
         if (Math.abs(newW - W) < 25) { W = newW; break; } W = newW;
       }
-      taxes = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false });
+      taxes = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false, seniors });
       const before = bTax; bTax -= seq.wTax; if (before > 0) basis *= bTax / before; bDef -= seq.wDef; bRoth -= seq.wRoth;
       wT = seq.wTax + 0; wD = seq.wDef + rmdHH; wR = seq.wRoth; gain = seq.gain;
       bTax += qualDiv; basis += qualDiv;
@@ -505,7 +518,8 @@ function simulate(S, opts = {}) {
       if (seq.shortfall > 1 && depletionAge === null) depletionAge = age;
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
     }
-    if (bTax < 0) bTax = 0; if (bDef < 0) bDef = 0; if (bRoth < 0) bRoth = 0;
+    eduBal *= 1 + growRate;                                            // 529/education savings grow with the market
+    if (bTax < 0) bTax = 0; if (bDef < 0) bDef = 0; if (bRoth < 0) bRoth = 0; if (eduBal < 0) eduBal = 0;
     if (basis < 0) basis = 0; if (basis > bTax) basis = bTax;
     const portfolio = bTax + bDef + bRoth, totalDebt = debts.reduce((s, d) => s + d.bal, 0);
     if (portfolio <= 1 && retired && depletionAge === null) depletionAge = age;
@@ -515,8 +529,8 @@ function simulate(S, opts = {}) {
       taxableIncome: taxes.taxableIncome, ordinaryTaxable: taxes.ordinaryTaxable, marginal: taxes.marginal, ssTaxable: taxes.ssTaxable,
       contribution: cPretax + cRoth + cTaxable + match, withdrawal: wT + wD + wR,
       wTax: wT, wDef: wD, wRoth: wR, bTax, bDef, bRoth, end: portfolio, debt: totalDebt,
-      reStatic, eduStatic, netWorth: portfolio + reStatic + eduStatic - totalDebt, income: wages + otherInc + ss + pension + annuityInc + disabilityInc + ev.in, annuity: annuityInc, disabilityInc, otherInc, evIn: ev.in, qcd: qcdAmt,
-      cPretax, cRoth, cTaxable, match, debtPay, evOut: ev.out, goalOut: gOut,
+      reStatic, eduStatic: eduBal, netWorth: portfolio + reStatic + eduBal - totalDebt, income: wages + otherInc + ss + pension + annuityInc + disabilityInc + ev.in + (anyWorking ? rmdHH : 0), annuity: annuityInc, disabilityInc, otherInc, evIn: ev.in, qcd: qcdAmt, rmdW: anyWorking ? rmdHH : 0,
+      cPretax, cRoth, cTaxable, match, debtPay, evOut: evOutNet, goalOut: gOut, eduDraw,
       savedToAccounts: cPretax + cRoth + cTaxable, leftover, surplusInvested: sweepSurplus, wagesC, wagesS, ssC: rowSsC, ssS: rowSsS, cumTax: lifetimeTax
     });
     rows.push(row);
@@ -1427,7 +1441,7 @@ function updateDashScrub() {
     { label: 'Wages', value: row.wages || 0, color: 'var(--gold)' },
     { label: 'Social Security', value: row.ss || 0, color: 'var(--ink)' },
     { label: 'Pension', value: row.pension || 0, color: '#7c8aa0' },
-    { label: 'RMD', value: row.rmd || 0, color: '#b08968' },
+    { label: 'RMD', value: Math.max(0, (row.rmd || 0) - (row.qcd || 0)), color: '#b08968' },
     { label: 'Portfolio', value: Math.max(0, (row.withdrawal || 0) - (row.rmd || 0)), color: 'var(--good)' }
   ].filter(x => x.value > 0);
   const totalIn = comp.reduce((s, x) => s + x.value, 0) || 1;
@@ -1703,6 +1717,7 @@ function cfBreakdown(r, metric) {
     { label: 'Annuity', value: r.annuity || 0, color: 'var(--gold-deep)' },
     { label: 'Disability', value: r.disabilityInc || 0, color: '#b08968' },
     { label: 'Other income', value: r.otherInc || 0, color: 'var(--good)' },
+    { label: 'RMD (required)', value: r.rmdW || 0, color: 'var(--warn)' },
     { label: 'Windfall / one-off', value: r.evIn || 0, color: 'var(--gold-2)' }
   ] };
   if (metric === 'spending') {
@@ -1711,7 +1726,7 @@ function cfBreakdown(r, metric) {
     const debtDrill = dl((STATE.liabilities || []).map(l => ({ l: escapeHtml(l.name || l.type || 'Loan') + ' (' + l.type + ')', v: (+l.payment || 0) * 12 })));
     const goalDrill = dl((STATE.goals || []).map(go => ({ l: escapeHtml(go.name || go.type), v: goalSpendYear([go], r.age, infl, curAge, (+A.eduInflation || 5) / 100) })));
     const evDrill = dl((STATE.events || []).map(e => ({ l: escapeHtml(e.label || e.type), v: applyEventsYear([e], r.age, r.t || 0, infl).out })));
-    return { title: 'Spending this year', items: [
+    return { title: 'Spending this year', note: (r.eduDraw || 0) > 0.5 ? '529/education savings covered ' + fmt$(r.eduDraw) + ' of tuition this year — drawn before household cash flow.' : undefined, items: [
       { label: 'Living expenses', value: r.expenses || 0, color: 'var(--gold)', drill: livingDrill },
       { label: 'Debt payments', value: r.debtPay || 0, color: '#b08968', drill: debtDrill },
       { label: 'Life-event costs', value: r.evOut || 0, color: '#7c8aa0', drill: evDrill },
@@ -1851,6 +1866,28 @@ function mcPanel() {
           ${statCard('Upside · 90th', fmtK(mc.endP90), { small: true })}</div></div>
     </div>`, { hideKey: 'found-mc', sub: 'Confidence' });
 }
+function methodologyPanel() {
+  const A = STATE.assumptions, SV = STATE.savings, R = RESULTS;
+  const li = (t, d) => `<div class="cf-bd-row" style="align-items:flex-start;padding:.18rem 0"><span style="flex:0 0 168px;font-weight:600;color:var(--ink-2)">${t}</span><span style="text-align:left;flex:1">${d}</span></div>`;
+  return panel('Assumptions & Methodology', `
+    <div class="section-label" style="margin-top:0">Key assumptions in this plan</div>
+    <div class="rr-grid" style="margin:.2rem 0 .6rem">
+      ${[['Inflation', pct(A.inflation, 1) + '/yr'], ['Return before retirement', pct(A.preReturn, 1) + (SV.mode === 'accounts' ? ' (blended by account)' : '')], ['Return in retirement', pct(A.postReturn, 1)], ['Salary growth', pct(STATE.income.salaryGrowth, 1) + '/yr'], ['SS COLA', pct(A.ssCola, 1) + '/yr'], ['Education inflation', pct(A.eduInflation, 1) + '/yr'], ['State tax', pct(A.stateTaxRate, 1) + ' flat'], ['RMDs begin', 'age ' + (A.rmdStartAge || 73)]].map(([k, v]) => `<div class="rr-cell"><label>${k}</label><div style="font-weight:600">${v}</div></div>`).join('')}
+    </div>
+    <div class="section-label">How every number is calculated</div>
+    ${li('Income taxes', `Federal tax uses the ${TAX.baseYear} brackets and standard deduction (filers 65+ get the extra standard deduction), indexed with inflation each projection year. Qualified dividends and realized gains stack on top of ordinary income at capital-gains rates. Social Security is taxed by the provisional-income rules. FICA applies per earner while working, each with their own wage-base cap. State tax is a flat rate on AGI less the deduction.`)}
+    ${li('Social Security', `You enter the benefit at full retirement age (67). Claiming earlier or later scales it — roughly 70% at 62 up to 124% at 70 — then it grows with COLA. If a spouse passes, the survivor keeps the larger of the two benefits.`)}
+    ${li('Withdrawals & RMDs', `Retirement spending draws taxable accounts first, then tax-deferred, then Roth; the engine iterates so withdrawals also cover the taxes they create. Required minimum distributions follow the IRS Uniform Lifetime table from age ${A.rmdStartAge || 73} — even in years a younger spouse is still working — and qualified charitable distributions satisfy RMDs tax-free.`)}
+    ${li('Savings', `Savings follow your chosen mode ($ / % of income / by account) and route to pre-tax, Roth, or taxable. The employer match is modeled on 401(k) contributions up to your plan limit. Leftover income after expenses, taxes and planned savings is ${SV.surplusMode === 'discretionary' ? 'treated as discretionary spending (not invested)' : 'invested as additional taxable savings'}.`)}
+    ${li('Education (529)', `Education balances grow with the market and tuition is paid from them first; only the uncovered share hits household cash flow.`)}
+    ${li('Goals & events', `Goals flagged onto the timeline create real cash flows: home and financed purchases spend the down payment and amortize a loan at your term and rate; long-term care applies the net-of-insurance cost over the care window; recurring goals (travel, gifting, charitable, custom) flow over their start–end ages at their own inflation. Each goal also shows the savings required to fund it.`)}
+    ${li('Debts', `Each liability amortizes at its rate and payment (or the payment derived from its term). The payoff accelerator applies extra payments avalanche (highest rate) or snowball (smallest balance) first.`)}
+    ${li('Guaranteed income', `Pensions and income annuities pay as income, not balances (an annuity purchase converts a premium to lifetime income at roughly 5% at 60 + 0.25% per year of age, capped at 9%). A joint-and-survivor pension election reduces the benefit ~15% × the continuation share and keeps it paying to the survivor.`)}
+    ${li('Monte Carlo', `${(mcAsync(() => {}) || { trials: 600 }).trials} trials with normally distributed annual returns (${pct(A.volatilityPre != null ? A.volatilityPre : 12, 0)} volatility before retirement, ${pct(A.volatilityPost != null ? A.volatilityPost : 9, 0)} after) around your expected returns; success = never depleting through age ${R.life}.`)}
+    ${li('What-ifs', `Decision-Center levers and scenarios (survivor, disability, market downturn) re-run this same engine with the change applied — nothing is a side calculation.`)}
+    <p class="rp-disclaimer" style="margin-top:.55rem">All figures are hypothetical estimates for planning conversation — not tax, legal, or investment advice. Tax rules are simplified (notably: portfolio draws that cover working-year shortfalls are not taxed, and account-level future balances are estimates within their tax bucket).</p>
+  `, { sub: 'How this plan works', hideKey: 'found-method', cls: 'advisor-only' });
+}
 function renderFoundational() {
   const R = RESULTS;
   const sources = [
@@ -1880,7 +1917,9 @@ function renderFoundational() {
         <div class="section-label">Retirement income sources (first year)</div>${donut(sources, { size: 160 })}`, { hideKey: 'found-ret' })}
     </div>
     <div style="height:1.1rem"></div>
-    ${panel('Goal Funding', goalProgressList(R), { hideKey: 'found-goals' })}`;
+    ${panel('Goal Funding', goalProgressList(R), { hideKey: 'found-goals' })}
+    <div style="height:1.1rem"></div>
+    ${methodologyPanel()}`;
 }
 
 /* ----------------------------- DECISION CENTER ---------------------------- */
@@ -1901,7 +1940,9 @@ function applyScenario(base) {
   const s = JSON.parse(JSON.stringify(base));
   s.household.client.retireAge = (+s.household.client.retireAge || 65) + SCENARIO.retireDelta;
   if (s.household.spouse.included) s.household.spouse.retireAge = (+s.household.spouse.retireAge || 65) + SCENARIO.retireDelta;
-  s.savings.annualSavings = (+s.savings.annualSavings || 0) * SCENARIO.savingsMult;
+  if (s.savings.mode === 'percent') s.savings.savingsRatePct = (+s.savings.savingsRatePct || 0) * SCENARIO.savingsMult;
+  else if (s.savings.mode === 'accounts') (s.assets || []).forEach(a => { if (+a.contribution > 0) a.contribution = (+a.contribution || 0) * SCENARIO.savingsMult; });
+  else s.savings.annualSavings = (+s.savings.annualSavings || 0) * SCENARIO.savingsMult;
   s.assumptions.preReturn = (+s.assumptions.preReturn || 0) + SCENARIO.returnDelta;
   s.assumptions.postReturn = (+s.assumptions.postReturn || 0) + SCENARIO.returnDelta;
   s.expenses.retirementExpensePct = (+s.expenses.retirementExpensePct || 0) + SCENARIO.spendDelta;
@@ -2071,7 +2112,7 @@ function ssOptimizerPanel() {
   const body = ssOptimizerBlock(c.name || 'Client', 'ssClaimClient', +I.ssClient || 0, R.curAge, R.life, +I.ssClaimClient || 67, cola)
     + (R.spOn ? ssOptimizerBlock(sp.name || 'Spouse', 'ssClaimSpouse', +I.ssSpouse || 0, spAgeNow, +sp.lifeExpectancy || R.life, +I.ssClaimSpouse || 67, cola) : '');
   return panel('Social Security Timing', (body || '<div class="empty">Enter a Social Security benefit on the Client Profile to compare claiming ages.</div>') +
-    `<p class="rp-disclaimer" style="margin-top:.4rem">Benefits estimated from the entered full-retirement-age (67) amount: roughly 70% at 62 and 124% at 70, grown by ${pct(STATE.assumptions.ssCola, 1)} COLA. Lifetime totals assume benefits through life expectancy; the optimal age depends on longevity, taxes, and spousal strategy — confirm with the client.</p>`,
+    `<p class="rp-disclaimer" style="margin-top:.4rem">Benefits estimated from the entered full-retirement-age (67) amount: roughly 70% at 62 and 124% at 70, grown by ${pct(STATE.assumptions.ssCola, 1)} COLA. Lifetime totals assume benefits through life expectancy; the optimal age depends on longevity, taxes, and spousal strategy — confirm with the client. The plan projection applies these same claiming-age factors.</p>`,
     { sub: 'Claiming strategy', hideKey: 'dec-ss' });
 }
 
@@ -2405,8 +2446,8 @@ function buildReport(opts) {
       ? R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge)
       : R.rows;
     pages.push(`<div class="report-page">${rpHead('Cash-Flow Projection')}
-      <table class="rp-tbl"><thead><tr><th style="text-align:left">Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Expenses</th><th>Save / Draw</th><th>Portfolio</th></tr></thead><tbody>
-      ${rows.map(r => { const flow = r.phase === 'work' ? r.contribution : -r.withdrawal; return `<tr><td style="text-align:left">${r.age}</td><td style="text-align:left">${r.phase === 'work' ? 'Working' : 'Retired'}</td><td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.expenses)}</td><td class="amount">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td><td class="amount">${fmtK(r.end)}</td></tr>`; }).join('')}
+      <table class="rp-tbl"><thead><tr><th style="text-align:left">Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Spending</th><th>Taxes</th><th>Saved / Drawn</th><th>Portfolio</th></tr></thead><tbody>
+      ${rows.map(r => { const flow = r.phase === 'work' ? (r.savedToAccounts || 0) : -(r.withdrawal || 0); return `<tr><td style="text-align:left">${r.age}</td><td style="text-align:left">${r.phase === 'work' ? 'Working' : 'Retired'}</td><td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.need)}</td><td class="amount">${fmtK(r.taxes)}</td><td class="amount">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td><td class="amount">${fmtK(r.end)}</td></tr>`; }).join('')}
       </tbody></table><p class="rp-note">Values are nominal (future dollars), reflecting ${pct(STATE.assumptions.inflation, 1)} assumed inflation.</p>${rpFoot}</div>`);
   }
   if (opts.tax) {
