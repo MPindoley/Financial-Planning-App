@@ -101,6 +101,7 @@ function defaultState() {
     events: [],
     rothStrategy: { on: false, mode: 'fill', toRate: 0.24, amount: 50000, startAge: 65, endAge: 72 },
     debtStrategy: { on: false, method: 'avalanche', extra: 0 },
+    withdrawalStrategy: { mode: 'sequential', order: ['taxable', 'traditional', 'roth'] },
     pensionElection: { survivorPct: 0 },
     charitableStrategy: { on: false, qcd: 0 },
     advisorNotes: '',
@@ -308,13 +309,18 @@ function rothConversionYear(S, ctx) {
   const curOrd = Math.max(0, pension + rmd + ssTax - std);
   return Math.min(Math.max(0, top - curOrd), bDef);
 }
-function sequenceWithdrawals(W, bTax, bDef, bRoth, basis) {
+function sequenceWithdrawals(W, bTax, bDef, bRoth, basis, order, mode) {
   let rem = Math.max(0, W);
-  const wTax = Math.min(bTax, rem); rem -= wTax;
-  const wDef = Math.min(bDef, rem); rem -= wDef;
-  const wRoth = Math.min(bRoth, rem); rem -= wRoth;
+  const w = { taxable: 0, traditional: 0, roth: 0 }, bal = { taxable: bTax, traditional: bDef, roth: bRoth };
+  if (mode === 'proportional') {                                       // pro-rata across all buckets by balance
+    const tot = bTax + bDef + bRoth;
+    if (tot > 0) { const draw = Math.min(rem, tot); w.taxable = draw * bTax / tot; w.traditional = draw * bDef / tot; w.roth = draw * bRoth / tot; rem -= draw; }
+  } else {                                                             // sequential: deplete one bucket, then the next, in the chosen order
+    const seq = (order && order.length === 3) ? order : ['taxable', 'traditional', 'roth'];
+    for (const k of seq) { const take = Math.min(bal[k] || 0, rem); w[k] = take; rem -= take; }
+  }
   const gainFrac = bTax > 0 ? Math.max(0, bTax - basis) / bTax : 0;
-  return { wTax, wDef, wRoth, gain: wTax * gainFrac, shortfall: rem };
+  return { wTax: w.taxable, wDef: w.traditional, wRoth: w.roth, gain: w.taxable * gainFrac, shortfall: rem };
 }
 
 /* ----------------------------- projection simulation ---------------------- */
@@ -355,6 +361,9 @@ function simulate(S, opts = {}) {
   const pensSurvPct = (+pe.survivorPct || 0) / 100, pensReduction = 1 - 0.15 * pensSurvPct;
   const cs = S.charitableStrategy || {};                             // charitable QCD strategy (off by default)
   const sweepSurplus = (SV.surplusMode || 'invest') !== 'discretionary';   // invest leftover income, or treat it as discretionary spending
+  const wStrat = S.withdrawalStrategy || {};                         // configurable drawdown order / proportional
+  const wOrder = (wStrat.order && wStrat.order.length === 3) ? wStrat.order : ['taxable', 'traditional', 'roth'];
+  const wMode = wStrat.mode === 'proportional' ? 'proportional' : 'sequential';
 
   const rows = []; let depletionAge = null, lifetimeTax = 0, lifetimeFedTax = 0, lifetimeStateTax = 0;
 
@@ -386,7 +395,7 @@ function simulate(S, opts = {}) {
     /* one-time balance/debt events */
     events.forEach(ev => {
       if (ev.type === 'downturn' && age === (+ev.atAge || 0)) { const k = 1 - (+ev.amount || 0) / 100; bTax *= k; bDef *= k; bRoth *= k; basis *= k; }
-      if (ev.type === 'mortgagePayoff' && age === (+ev.atAge || 0)) { debts.forEach(d => { if (d.type === 'mortgage' && d.bal > 0) { bTax -= d.bal; d.bal = 0; } }); }
+      if (ev.type === 'mortgagePayoff' && age === (+ev.atAge || 0)) { debts.forEach(d => { if (d.type === 'mortgage' && d.bal > 0) { let p = d.bal; const tT = Math.min(bTax, p); bTax -= tT; p -= tT; const tD = Math.min(bDef, p); bDef -= tD; p -= tD; bRoth -= Math.min(bRoth, p); if (basis > bTax) basis = bTax; d.bal = 0; } }); }   // pay off from taxable → deferred → Roth (never drive a bucket negative)
       if (ev.type === 'sellAsset' && age === (+ev.atAge || 0)) { const pr = (+ev.amount || 0) * g; bTax += pr; basis += pr; }   // proceeds into taxable
       if (ev.type === 'annuity' && age === (+ev.atAge || 0)) { let prem = (+ev.amount || 0) * g; const tT = Math.min(bTax, prem); bTax -= tT; prem -= tT; const tD = Math.min(bDef, prem); bDef -= tD; prem -= tD; bRoth -= Math.min(bRoth, prem); if (basis > bTax) basis = bTax; }   // premium out of portfolio
     });
@@ -496,17 +505,17 @@ function simulate(S, opts = {}) {
       taxes = computeTax({ wages, pretax: cPretax, pension, otherIncome: otherInc, taxableInterest: 0, qualDiv, ss, deferredWithdrawal: rmdHH + conversion, filing: filingY, stateRate, inflFac, isWorking: true, ficaWages: [wagesC, wagesS], seniors });
       const netCash = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc + rmdHH - taxes.total - need - cPretax - cRoth - cTaxable;
       if (netCash >= 0) { leftover = netCash; if (sweepSurplus) { bTax += netCash; basis += netCash; } }   // leftover: invest it, or leave it discretionary
-      else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
+      else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis, wOrder, wMode); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
     } else {
       bDef -= rmd;
       if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
       const guaranteed = ss + pension + ev.in + annuityInc + disabilityInc;
-      let W = Math.max(0, need - guaranteed - rmdHH), seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis);
+      let W = Math.max(0, need - guaranteed - rmdHH), seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis, wOrder, wMode);
       for (let i = 0; i < 8; i++) {
         const tx = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false, seniors });
         const newW = Math.max(0, need - guaranteed - rmdHH + tx.total);
-        seq = sequenceWithdrawals(newW, bTax, bDef, bRoth, basis);
+        seq = sequenceWithdrawals(newW, bTax, bDef, bRoth, basis, wOrder, wMode);
         if (Math.abs(newW - W) < 25) { W = newW; break; } W = newW;
       }
       taxes = computeTax({ pension, qualDiv, deferredWithdrawal: seq.wDef + rmdHH + conversion, ss, ltcgRealized: seq.gain, filing: filingY, stateRate, inflFac, isWorking: false, seniors });
@@ -575,7 +584,7 @@ function monteCarlo(S, trials) {
     endP10: q(0.10), endP50: q(0.50), endP90: q(0.90) };
 }
 function mcSignature(S) {
-  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.goals, S.rothStrategy, S.debtStrategy, S.survivor, S.disability, S.pensionElection, S.charitableStrategy]);
+  return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.goals, S.rothStrategy, S.debtStrategy, S.withdrawalStrategy, S.survivor, S.disability, S.pensionElection, S.charitableStrategy]);
 }
 const MC_MULTI = new Map();
 function mcFor(S, trials) {
@@ -1263,7 +1272,7 @@ function headBlock(eyebrow, title, sub, extra = '') {
 }
 function ensureDefaults(S) {
   const d = defaultState();
-  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'debtStrategy', 'pensionElection', 'charitableStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
+  ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'debtStrategy', 'withdrawalStrategy', 'pensionElection', 'charitableStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
   S.expenses.budget = Object.assign({}, d.expenses.budget, S.expenses.budget);   // deep-merge budget categories for older plans
   S.household = S.household || d.household;
   S.household.client = Object.assign({}, d.household.client, S.household.client);
@@ -2161,6 +2170,38 @@ function taxBracketBar(income, brackets) {
     <text x="${cx.toFixed(1)}" y="${top - 30}" text-anchor="middle" style="font-size:10px;letter-spacing:.06em;font-weight:700;fill:var(--gold-deep)">YOUR TAXABLE INCOME</text>
     <text x="${cx.toFixed(1)}" y="${top - 15}" text-anchor="middle" class="amount" style="font-size:14px;font-weight:700;fill:var(--ink)">${fmt$(income)}</text>${ticks}</svg>`;
 }
+const WD_NAMES = { taxable: 'Taxable / brokerage', traditional: 'Tax-deferred · 401(k)/IRA', roth: 'Roth · tax-free' };
+function withdrawalOrderControls() {
+  const ws = STATE.withdrawalStrategy || {}, mode = ws.mode === 'proportional' ? 'proportional' : 'sequential';
+  const order = (ws.order && ws.order.length === 3) ? ws.order : ['taxable', 'traditional', 'roth'];
+  const list = order.map((k, i) => `<div class="wd-item">
+      <span class="wd-pos">${i + 1}</span><span class="wd-name">${WD_NAMES[k]}</span>
+      <span class="wd-move">
+        <button class="wd-btn" data-action="wd-move" data-key="${k}" data-dir="-1" ${i === 0 ? 'disabled' : ''} title="Draw earlier" aria-label="Move ${WD_NAMES[k]} earlier">▲</button>
+        <button class="wd-btn" data-action="wd-move" data-key="${k}" data-dir="1" ${i === 2 ? 'disabled' : ''} title="Draw later" aria-label="Move ${WD_NAMES[k]} later">▼</button>
+      </span></div>`).join('');
+  return field({ path: 'withdrawalStrategy.mode', label: 'Drawdown method', type: 'select', options: [{ value: 'sequential', label: 'In order — deplete one, then the next' }, { value: 'proportional', label: 'Proportional — pro-rata across all' }] })
+    + (mode === 'sequential'
+      ? `<div class="section-label">Draw from accounts in this order</div><div class="wd-list">${list}</div>`
+      : `<p class="budget-note" style="margin-top:.4rem">Each year's income is drawn pro-rata across taxable, tax-deferred and Roth in proportion to their balances.</p>`)
+    + `<p class="budget-note">Required minimum distributions always come out of tax-deferred first; this order then funds the <b>remaining</b> income need.</p>`;
+}
+function withdrawalReadout(R) {
+  const ws = STATE.withdrawalStrategy || {}, mode = ws.mode === 'proportional' ? 'proportional' : 'sequential';
+  const ret = R.rows.filter(r => r.age >= R.retAge);
+  const depAge = key => { const hit = ret.find(r => (r[key] || 0) < 1 && (ret[0] && (ret[0][key] || 0) > 1)); return hit ? hit.age : null; };
+  const buckets = [['bTax', 'Taxable / brokerage', 'taxable'], ['bDef', 'Tax-deferred · 401(k)/IRA', 'traditional'], ['bRoth', 'Roth · tax-free', 'roth']];
+  const order = (ws.order && ws.order.length === 3) ? ws.order : ['taxable', 'traditional', 'roth'];
+  const rows = buckets.sort((a, b) => order.indexOf(a[2]) - order.indexOf(b[2])).map(([k, label]) => {
+    const d = depAge(k), start = ret[0] ? ret[0][k] || 0 : 0;
+    return `<div class="cf-bd-row"><span><i class="dot" style="background:${k === 'bTax' ? 'var(--gold)' : k === 'bDef' ? 'var(--ink)' : 'var(--gold-deep)'}"></i>${label}</span><b class="amount">${start < 1 ? 'empty' : d ? 'depletes ~age ' + d : 'lasts the plan'}</b></div>`;
+  }).join('');
+  return panel('Drawdown Sequence', `
+    <p class="i-action" style="margin-top:0">${mode === 'proportional' ? 'Income is drawn pro-rata across all accounts each year.' : 'Income draws from <b>' + WD_NAMES[order[0]] + '</b> first; as each account empties, the plan automatically rolls to the next.'}</p>
+    <div class="section-label">When each account is projected to deplete (in retirement)</div>
+    ${rows}
+    <p class="rp-disclaimer" style="margin-top:.4rem">Order changes which accounts are taxed when, so lifetime taxes and how long the portfolio lasts can shift. RMDs still come from tax-deferred first.</p>`, { hideKey: 'tax-wd', sub: 'Income sequencing' });
+}
 function buildTax() {
   const rothControls =
     toggleField('rothStrategy.on', 'Apply Roth conversion strategy to the plan') +
@@ -2182,6 +2223,7 @@ function buildTax() {
     `<div class="split io-split"><div class="advisor-only io-inputs">
       ${panel('Tax Inputs', taxAssumptions, { sub: 'Drives every projection' })}
       ${panel('Roth Conversion Analyzer', rothControls, { sub: 'What-if' })}
+      ${panel('Withdrawal Sequencing', withdrawalOrderControls(), { sub: 'Which account funds retirement income' })}
     </div><div id="res-tax"></div></div>`;
 }
 function liveTax() {
@@ -2235,6 +2277,8 @@ function liveTax() {
       </div>
       <p class="rp-disclaimer" style="font-size:.78rem">${STATE.rothStrategy.on ? '✓ This strategy is currently applied to the plan.' : 'Toggle “Apply to the plan” on the left to build this into the projection.'} Roth conversion suitability depends on future tax rates, IRMAA, state taxes, and estate goals — review with the client’s CPA.</p>
       `, { hideKey: 'tax-roth' })}
+    <div style="height:1.1rem"></div>
+    ${withdrawalReadout(R)}
     <p class="rp-disclaimer" style="margin-top:1rem">Tax figures are simplified estimates using ${curYear} federal brackets (inflated forward), a flat ${pct(A.stateTaxRate, 1)} state rate, and standard deductions. They exclude credits, AMT, NIIT, IRMAA, and many deductions. For tax preparation or advice, the client should consult their CPA.</p>`;
 }
 
@@ -2515,6 +2559,13 @@ function handleAction(action, el) {
     case 'add-event': (STATE.events = STATE.events || []).push({ id: uid(), type: el.dataset.type || 'expense', label: '', amount: 25000, atAge: (RESULTS.curAge || 50) + 5, startAge: (RESULTS.curAge || 50) + 5, years: 3 }); rebuildEvents(); recompute(); break;
     case 'del-event': STATE.events.splice(idx, 1); rebuildEvents(); recompute(); break;
     case 'goto': showView(el.dataset.view); break;
+    case 'wd-move': {
+      const ws = STATE.withdrawalStrategy = STATE.withdrawalStrategy || { mode: 'sequential', order: ['taxable', 'traditional', 'roth'] };
+      if (!ws.order || ws.order.length !== 3) ws.order = ['taxable', 'traditional', 'roth'];
+      const i = ws.order.indexOf(el.dataset.key), j = i + (+el.dataset.dir);
+      if (i >= 0 && j >= 0 && j < 3) { const o = ws.order.slice(); [o[i], o[j]] = [o[j], o[i]]; ws.order = o; }
+      built[currentView] = false; RESULTS = compute(STATE); showView(currentView); scheduleSave(); break;
+    }
     case 'cf-granularity': CF_GRANULARITY = el.dataset.mode === 'five' ? 'five' : 'all'; liveCashflow(); break;
     case 'set-exp-mode': {
       const m = el.dataset.mode, E = STATE.expenses;
