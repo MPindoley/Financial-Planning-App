@@ -68,6 +68,27 @@ function livingExpenses(E) {
   return +(E && E.annualExpenses) || 0;
 }
 const CONTRIB_TYPES = ['cash', 'taxable', 'traditional', 'roth', 'other'];   // accounts that accept ongoing contributions
+/* Year-1 per-account contributions + employer match for a plan state (accounts mode) — mirrors simulate()'s rules. */
+function acctContribsFor(S) {
+  const I = S.income || {}, spIncl = !!(S.household && S.household.spouse && S.household.spouse.included);
+  const wc = +I.clientSalary || 0, ws = spIncl ? (+I.spouseSalary || 0) : 0;
+  let employee = 0, pretax = 0, match = 0, anyAcctMatch = false;
+  (S.assets || []).forEach(a => {
+    if (!CONTRIB_TYPES.includes(a.type)) return;
+    const owner = a.owner || (a.type === 'traditional' || a.type === 'roth' ? 'client' : 'household');
+    const base = owner === 'spouse' ? ws : owner === 'household' ? wc + ws : wc;
+    const c = a.contribMode === 'pct' ? base * (+a.contribPct || 0) / 100 : (+a.contribution || 0) * 12;
+    employee += c; if (a.type === 'traditional') pretax += c;
+    if (a.type === 'traditional' && (+a.matchPct || 0) > 0 && base > 0) {
+      anyAcctMatch = true;
+      match += base * Math.min(c / base, (+a.matchCapPct || 0) / 100) * ((+a.matchPct || 0) / 100);
+    }
+  });
+  const SV = S.savings || {}, gross = wc + ws;
+  if (!anyAcctMatch && (+SV.matchPct || 0) > 0 && gross > 0)
+    match = gross * Math.min(pretax / gross, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100);
+  return { employee, match };
+}
 /* Balance-weighted expected accumulation return — lets each account carry its own growth rate in "by account" savings mode. */
 function blendedPreReturn(S) {
   const pre = (+(S.assumptions && S.assumptions.preReturn) || 0) / 100;
@@ -87,9 +108,9 @@ function defaultState() {
       filing: 'married', state: ''
     },
     income: { clientSalary: 0, spouseSalary: 0, otherIncome: 0, salaryGrowth: 3,
-              ssClient: 0, ssSpouse: 0, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 },
+              ssClient: 0, ssSpouse: 0, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0, pensionCola: 0 },
     expenses: { annualExpenses: 0, retirementExpensePct: 80, expenseMode: 'simple', budget: { housing: 0, utilities: 0, food: 0, transportation: 0, healthcare: 0, insurance: 0, personal: 0, other: 0 } },
-    savings:  { annualSavings: 0, employerMatch: 0, mode: 'dollar', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0, targetRatePct: 15, surplusMode: 'invest' },
+    savings:  { annualSavings: 0, employerMatch: 0, mode: 'accounts', savingsRatePct: 0, matchPct: 0, matchLimitPct: 0, targetRatePct: 15, surplusMode: 'invest' },
     savingsSplit: { pretax: 70, roth: 15, taxable: 15 },
     assets: [], liabilities: [],
     insurance: { lifeClient: 0, lifeSpouse: 0 },
@@ -118,7 +139,7 @@ function sampleState() {
   s.household.filing = 'married'; s.household.state = 'NC';
   s.income = { clientSalary: 110000, spouseSalary: 65000, otherIncome: 0, salaryGrowth: 3, ssClient: 30000, ssSpouse: 20000, ssClaimClient: 67, ssClaimSpouse: 67, pension: 0 };
   s.expenses = { annualExpenses: 95000, retirementExpensePct: 90 };
-  s.savings = { annualSavings: 14000, employerMatch: 5000 };
+  s.savings = { annualSavings: 14000, employerMatch: 5000, mode: 'accounts', targetRatePct: 15, surplusMode: 'invest' };
   s.savingsSplit = { pretax: 75, roth: 10, taxable: 15 };
   s.assumptions = { inflation: 2.7, preReturn: 6.5, postReturn: 4.8, eduInflation: 5, effectiveTaxRate: 22, ssCola: 2.3, stateTaxRate: 4.5, dividendYield: 1.8, taxableBasisPct: 60, rmdStartAge: 73 };
   s.events = [
@@ -127,10 +148,10 @@ function sampleState() {
   ];
   s.assets = [
     { id: uid(), name: 'Cash Reserve',        type: 'cash',        balance: 35000 },
-    { id: uid(), name: 'Joint Brokerage',     type: 'taxable',     balance: 90000 },
-    { id: uid(), name: 'James 401(k)',        type: 'traditional', balance: 240000 },
-    { id: uid(), name: 'Sarah 403(b)',        type: 'traditional', balance: 150000 },
-    { id: uid(), name: 'Roth IRAs',           type: 'roth',        balance: 60000 },
+    { id: uid(), name: 'Joint Brokerage',     type: 'taxable',     balance: 90000,  contribution: 150 },
+    { id: uid(), name: 'James 401(k)',        type: 'traditional', balance: 240000, contribMode: 'pct', contribPct: 6, matchPct: 100, matchCapPct: 4 },
+    { id: uid(), name: 'Sarah 403(b)',        type: 'traditional', balance: 150000, contribMode: 'pct', contribPct: 6, owner: 'spouse' },
+    { id: uid(), name: 'Roth IRAs',           type: 'roth',        balance: 60000,  contribution: 250 },
     { id: uid(), name: '529 College Savings', type: 'education',   balance: 40000 },
     { id: uid(), name: 'Primary Residence',   type: 'realestate',  balance: 520000 }
   ];
@@ -336,7 +357,10 @@ function simulate(S, opts = {}) {
   const endAge = Math.max(life, spOn ? spLife : life);
   const rmdAge = +A.rmdStartAge || 73;
   const ssClaimC = clamp(+I.ssClaimClient || clientRet, 62, 70), ssClaimS = clamp(+I.ssClaimSpouse || spRet, 62, 70);
-  const ssFacC = ssFactor(ssClaimC), ssFacS = ssFactor(ssClaimS);   // entered benefit = FRA-67 amount; claiming early/late scales it (~70% at 62 … 124% at 70)
+  /* Future claim: entered benefit = FRA-67 estimate, scaled for the chosen claim age (~70% at 62 … 124% at 70).
+     Already claiming (at/past the claim age today): the entered amount IS the actual check — use it as-is. */
+  const ssFacC = curAge >= ssClaimC ? 1 : ssFactor(ssClaimC), ssFacS = spAge0 >= ssClaimS ? 1 : ssFactor(ssClaimS);
+  const pensCola = (+I.pensionCola || 0) / 100;                     // most pensions are level — no silent CPI indexing
   const curYear = new Date().getFullYear();
 
   const by = {}; (S.assets || []).forEach(a => by[a.type] = (by[a.type] || 0) + (+a.balance || 0));
@@ -429,7 +453,7 @@ function simulate(S, opts = {}) {
     ss = (deadClient || deadSpouse) ? Math.max(ssC, ssS) : ssC + ssS;   // survivor keeps the larger benefit
     let rowSsC = ssC, rowSsS = ssS;                                     // split that actually sums to ss (for the breakdown drill-down)
     if (deadClient || deadSpouse) { if (ssC >= ssS) { rowSsC = ss; rowSsS = 0; } else { rowSsC = 0; rowSsS = ss; } }
-    let pension = retired ? (+I.pension || 0) * g * pensReduction : 0;   // pension election reduces the lifetime benefit
+    let pension = retired ? (+I.pension || 0) * pow(1 + pensCola, t) * pensReduction : 0;   // level unless a COLA is set; election reduces the benefit
     if (pension > 0 && (deadClient || deadSpouse)) pension *= pensSurvPct; // survivor continuation per the election
     let disabilityInc = 0;                                              // disability income replacement (% of salary, pre-retirement)
     if (disClient) disabilityInc += (+I.clientSalary || 0) * pow(1 + salg, t) * disPct;
@@ -440,12 +464,24 @@ function simulate(S, opts = {}) {
     let cPretax = 0, cRoth = 0, cTaxable = 0, match = 0;
     if (anyWorking) {
       if (SV.mode === 'accounts') {                                      // per-account contributions, classified by account type
+        let anyAcctMatch = false;
         (S.assets || []).forEach(a => {
           if (!CONTRIB_TYPES.includes(a.type)) return;
-          const c = (+a.contribution || 0) * 12 * pow(1 + salg, t);
+          const owner = a.owner || (a.type === 'traditional' || a.type === 'roth' ? 'client' : 'household');
+          const ownerWorking = owner === 'spouse' ? spouseWorking : owner === 'household' ? anyWorking : clientWorking;
+          if (!ownerWorking) return;                                     // contributions stop when that person's paychecks do
+          const ownerWages = owner === 'spouse' ? wagesS : owner === 'household' ? wages : wagesC;
+          const c = a.contribMode === 'pct'
+            ? ownerWages * (+a.contribPct || 0) / 100                     // % of that person's salary — scales as pay grows
+            : (+a.contribution || 0) * 12 * pow(1 + salg, t);
           if (a.type === 'roth') cRoth += c; else if (a.type === 'traditional') cPretax += c; else cTaxable += c;
+          if (a.type === 'traditional' && (+a.matchPct || 0) > 0 && ownerWages > 0) {   // employer match lives on the account
+            anyAcctMatch = true;
+            const rate = Math.min(c / ownerWages, (+a.matchCapPct || 0) / 100);
+            match += ownerWages * rate * ((+a.matchPct || 0) / 100);
+          }
         });
-        if ((+SV.matchPct || 0) > 0 && wages > 0) {                      // employer match on 401(k)/pre-tax contributions
+        if (!anyAcctMatch && (+SV.matchPct || 0) > 0 && wages > 0) {     // legacy global match (older plans)
           const rate = Math.min(cPretax / wages, (+SV.matchLimitPct || 0) / 100);
           match = wages * rate * ((+SV.matchPct || 0) / 100);
         }
@@ -502,10 +538,25 @@ function simulate(S, opts = {}) {
       bDef += cPretax + match; bRoth += cRoth; bTax += cTaxable + qualDiv; basis += cTaxable + qualDiv;
       bDef -= rmd;                                                     // RMDs are mandatory even while a (younger) spouse still works
       if (conversion > 0) { const cv = Math.min(conversion, bDef); bDef -= cv; bRoth += cv; conversion = cv; }
-      taxes = computeTax({ wages, pretax: cPretax, pension, otherIncome: otherInc, taxableInterest: 0, qualDiv, ss, deferredWithdrawal: rmdHH + conversion, filing: filingY, stateRate, inflFac, isWorking: true, ficaWages: [wagesC, wagesS], seniors });
-      const netCash = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc + rmdHH - taxes.total - need - cPretax - cRoth - cTaxable;
+      const baseTax = { wages, pretax: cPretax, pension, otherIncome: otherInc, taxableInterest: 0, qualDiv, ss, filing: filingY, stateRate, inflFac, isWorking: true, ficaWages: [wagesC, wagesS], seniors };
+      taxes = computeTax({ ...baseTax, deferredWithdrawal: rmdHH + conversion });
+      const cashIn = wages + otherInc + ss + pension + ev.in + annuityInc + disabilityInc + rmdHH;
+      const netCash = cashIn - taxes.total - need - cPretax - cRoth - cTaxable;
       if (netCash >= 0) { leftover = netCash; if (sweepSurplus) { bTax += netCash; basis += netCash; } }   // leftover: invest it, or leave it discretionary
-      else { const s = sequenceWithdrawals(-netCash, bTax, bDef, bRoth, basis, wOrder, wMode); const before = bTax; bTax -= s.wTax; if (before > 0) basis *= bTax / before; bDef -= s.wDef; bRoth -= s.wRoth; wT = s.wTax; wD = s.wDef; wR = s.wRoth; }
+      else {                                                           // shortfall funded from savings — tax the deferred draw like any other withdrawal
+        const hadPortfolio = (bTax + bDef + bRoth) > 1;
+        let W = -netCash, seq = sequenceWithdrawals(W, bTax, bDef, bRoth, basis, wOrder, wMode);
+        for (let i = 0; i < 8; i++) {
+          const tx = computeTax({ ...baseTax, deferredWithdrawal: rmdHH + conversion + seq.wDef, ltcgRealized: seq.gain });
+          const newW = Math.max(0, need + cPretax + cRoth + cTaxable + tx.total - cashIn);
+          seq = sequenceWithdrawals(newW, bTax, bDef, bRoth, basis, wOrder, wMode);
+          if (Math.abs(newW - W) < 25) { W = newW; break; } W = newW;
+        }
+        taxes = computeTax({ ...baseTax, deferredWithdrawal: rmdHH + conversion + seq.wDef, ltcgRealized: seq.gain });
+        const before = bTax; bTax -= seq.wTax; if (before > 0) basis *= bTax / before; bDef -= seq.wDef; bRoth -= seq.wRoth;
+        wT = seq.wTax; wD = seq.wDef; wR = seq.wRoth; gain = seq.gain;
+        if (seq.shortfall > 1 && hadPortfolio && depletionAge === null) depletionAge = age;
+      }
       bTax *= 1 + growRate; bDef *= 1 + growRate; bRoth *= 1 + growRate;
     } else {
       bDef -= rmd;
@@ -701,11 +752,10 @@ function compute(S) {
   const grossIncome = (+I.clientSalary || 0) + (spOn ? (+I.spouseSalary || 0) : 0) + (+I.otherIncome || 0);
   const annualExp = livingExpenses(E);
   const retExpToday = annualExp * ((+E.retirementExpensePct || 100) / 100);
-  const acctContrib = (S.assets || []).reduce((s, a) => s + (CONTRIB_TYPES.includes(a.type) ? (+a.contribution || 0) * 12 : 0), 0);
-  const acctPretax = (S.assets || []).reduce((s, a) => s + (a.type === 'traditional' ? (+a.contribution || 0) * 12 : 0), 0);
-  const baseContrib = SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * grossIncome : SV.mode === 'accounts' ? acctContrib : (+SV.annualSavings || 0);
+  const acct = SV.mode === 'accounts' ? acctContribsFor(S) : null;
+  const baseContrib = SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * grossIncome : acct ? acct.employee : (+SV.annualSavings || 0);
   const empMatch = SV.mode === 'percent' ? grossIncome * Math.min((+SV.savingsRatePct || 0) / 100, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100)
-    : SV.mode === 'accounts' ? (grossIncome > 0 ? grossIncome * Math.min(acctPretax / grossIncome, (+SV.matchLimitPct || 0) / 100) * ((+SV.matchPct || 0) / 100) : 0)
+    : acct ? acct.match
     : (+SV.employerMatch || 0);
   const annualSavings = baseContrib + empMatch;
   const savingsRate = grossIncome > 0 ? annualSavings / grossIncome : 0;
@@ -727,15 +777,24 @@ function compute(S) {
     capitalNeeded = pvGrowingAnnuity(Math.max(0, needAtRet - guaranteedAtRet), post, infl, retYears);
     extraMonthly = pmtForFV(Math.max(0, capitalNeeded - projAtRet), pre, yearsToRet) / 12;
   }
-  const fundedRatio = capitalNeeded > 0 ? projAtRet / capitalNeeded : (projAtRet > 0 ? 2 : 1);
-  const surplus = projAtRet - capitalNeeded;
-  const shortfallFV = Math.max(0, capitalNeeded - projAtRet);
-
   /* year-by-year simulation (taxes, three tax buckets, debt amortization, RMDs, events) */
   const sim = simulate(S);
   const rows = sim.rows;
   const endingBalance = sim.endingBalance;
   const depletionAge = sim.depletionAge;
+
+  /* Gross the capital need up for taxes, using the simulation's first retirement year — the
+     analytic gap is pre-tax, but every real withdrawal must also cover the taxes it creates. */
+  const r1 = rows.find(r => r.phase === 'retire');
+  if (r1) {
+    const g1 = (r1.ss || 0) + (r1.pension || 0) + (r1.annuity || 0);
+    const netGap = Math.max(0, (r1.need || 0) - g1);
+    if (netGap > 0 && (r1.withdrawal || 0) > netGap) capitalNeeded *= clamp(r1.withdrawal / netGap, 1, 3);
+  }
+  const fundedRatio = capitalNeeded > 0 ? projAtRet / capitalNeeded : (projAtRet > 0 ? 2 : 1);
+  const surplus = projAtRet - capitalNeeded;
+  const shortfallFV = Math.max(0, capitalNeeded - projAtRet);
+  if (!alreadyRetired) extraMonthly = pmtForFV(shortfallFV, pre, yearsToRet) / 12;   // reflects the tax-grossed capital need
 
   /* quick education needs */
   const QE = S.quickEducation || {};
@@ -1021,12 +1080,17 @@ function field(f) {
   if (f.type === 'textarea') {
     return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label><textarea data-path="${f.path}" data-vtype="text" rows="${f.rows || 4}" placeholder="${escapeAttr(f.ph || '')}">${escapeHtml(v ?? '')}</textarea></div>`;
   }
-  const isCur = f.type === 'currency', isPct = f.type === 'percent', isText = f.type === 'text';
-  const pre = isCur ? '<span class="prefix">$</span>' : '';
-  const suf = isPct ? '<span class="suffix">%</span>' : (f.suffix ? `<span class="suffix">${escapeHtml(f.suffix)}</span>` : '');
-  const cls = `control ${isCur ? 'has-prefix' : ''} ${(isPct || f.suffix) ? 'has-suffix' : ''}`.trim();
-  let input;
-  if (isCur) {
+  const isCur = f.type === 'currency', isMo = f.type === 'monthly', isPct = f.type === 'percent', isText = f.type === 'text';
+  const pre = (isCur || isMo) ? '<span class="prefix">$</span>' : '';
+  const suf = isPct ? '<span class="suffix">%</span>' : (isMo ? '<span class="suffix">/mo</span>' : (f.suffix ? `<span class="suffix">${escapeHtml(f.suffix)}</span>` : ''));
+  const cls = `control ${(isCur || isMo) ? 'has-prefix' : ''} ${(isPct || isMo || f.suffix) ? 'has-suffix' : ''}`.trim();
+  let input, echo = '';
+  if (isMo) {
+    /* Monthly-first money field: the advisor types $/month; the plan stores the annual figure at f.path. */
+    const annual = +v || 0;
+    input = `<input type="text" inputmode="decimal" data-path="${f.path}" data-money data-permonth value="${escapeAttr(moneyDisplay(annual ? Math.round(annual / 12) : ''))}" placeholder="${escapeAttr(f.ph || '0')}">`;
+    echo = `<div class="annual-echo" data-echo-for="${f.path}">${annual > 0 ? '= ' + fmt$(annual) + ' per year' : '&nbsp;'}</div>`;
+  } else if (isCur) {
     input = `<input type="text" inputmode="decimal" data-path="${f.path}" data-money value="${escapeAttr(moneyDisplay(v))}" placeholder="${escapeAttr(f.ph || '0')}">`;
   } else {
     const vtype = isText ? 'text' : (f.type || 'number');
@@ -1034,7 +1098,7 @@ function field(f) {
     const attrs = isText ? '' : `step="${step}" min="${f.min != null ? f.min : 0}" ${f.max != null ? `max="${f.max}"` : ''}`;
     input = `<input type="${isText ? 'text' : 'number'}" data-path="${f.path}" data-vtype="${vtype}" value="${escapeAttr(v ?? '')}" ${attrs} placeholder="${escapeAttr(f.ph || '')}">`;
   }
-  return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label><div class="${cls}">${pre}${input}${suf}</div></div>`;
+  return `<div class="field"><label>${escapeHtml(f.label)}${hint}</label><div class="${cls}">${pre}${input}${suf}</div>${echo}</div>`;
 }
 const fieldRow = (...f) => `<div class="field-row${f.length === 3 ? ' three' : ''}">${f.map(field).join('')}</div>`;
 
@@ -1046,7 +1110,9 @@ function profileSectionStatus(S) {                        /* reuses factFinder's
   return {
     household: (c.name && (!sp.included || sp.name)) ? 'ok' : 'todo',
     income: (pos(I.clientSalary) || pos(I.otherIncome) || (sp.included && pos(I.spouseSalary))) ? 'ok' : 'todo',
-    expenses: (livingExpenses(E) > 0 && (pos(SV.savingsRatePct) || pos(SV.annualSavings) || pos(SV.employerMatch))) ? 'ok' : 'todo',
+    expenses: (livingExpenses(E) > 0 && (pos(SV.savingsRatePct) || pos(SV.annualSavings) || pos(SV.employerMatch)
+      || (SV.mode === 'accounts' && (S.assets || []).some(a => pos(a.contribution) || pos(a.contribPct)))
+      || +S.household.client.age >= +S.household.client.retireAge)) ? 'ok' : 'todo',   // retirees aren't expected to be saving
     assets: (S.assets && S.assets.length) ? 'ok' : 'todo',
     insurance: pos(INS.lifeClient) ? 'ok' : 'todo'
     /* liabilities / assumptions / notes are optional → no status dot */
@@ -1089,11 +1155,11 @@ function expensesBlock() {
   const E = STATE.expenses, detailed = E.expenseMode === 'detailed';
   const inputs = detailed
     ? `<div class="grid cols-2">${EXP_CATS.map(([k, l]) => field({ path: `expenses.budget.${k}`, label: l, type: 'currency', suffix: '/mo' })).join('')}</div>`
-    : field({ path: 'expenses.annualExpenses', label: 'Annual living expenses', type: 'currency' });
-  return `<div class="block-head"><span class="block-title">Living expenses</span>${modeSeg('set-exp-mode', E.expenseMode || 'simple', [['simple', 'Single total'], ['detailed', 'Monthly budget']])}</div>
-    <p class="budget-note">Living costs only — <b>loan &amp; mortgage payments are added automatically</b> from the Liabilities section, so don’t enter them here.</p>
+    : field({ path: 'expenses.annualExpenses', label: 'How much do they spend a month?', hint: 'today’s dollars', type: 'monthly', ph: 'e.g. 10,000' });
+  return `<div class="block-head"><span class="block-title">Living expenses</span>${modeSeg('set-exp-mode', E.expenseMode || 'simple', [['simple', 'Monthly total'], ['detailed', 'Walk the budget']])}</div>
+    <p class="budget-note">Living costs only — <b>loan &amp; mortgage payments are added automatically</b> from the Liabilities section, so don’t enter them here. If they don’t know the number, switch to <b>Walk the budget</b> and build it together.</p>
     ${inputs}
-    ${field({ path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today’s expenses', type: 'percent' })}`;
+    ${field({ path: 'expenses.retirementExpensePct', label: 'Spending in retirement', hint: '% of today’s spending — 100 = unchanged', type: 'percent', ph: '100' })}`;
 }
 function savingsBlock() {
   const SV = STATE.savings, mode = SV.mode || 'dollar';
@@ -1101,8 +1167,8 @@ function savingsBlock() {
   const split = sectionLabel('Where new savings go (tax treatment)') + fieldRow({ path: 'savingsSplit.pretax', label: 'Pre-tax', hint: '401k / IRA', type: 'percent' }, { path: 'savingsSplit.roth', label: 'Roth', type: 'percent' }, { path: 'savingsSplit.taxable', label: 'Taxable', type: 'percent' });
   let inputs;
   if (mode === 'percent') inputs = field({ path: 'savings.savingsRatePct', label: 'You save', hint: 'of gross income — scales as pay grows', type: 'percent' }) + matchRow + split;
-  else if (mode === 'accounts') inputs = field({ path: 'savings.targetRatePct', label: 'Target savings rate', hint: '% of gross income — the goal to hit', type: 'percent' }) + matchRow
-    + `<p class="budget-note">Enter the <b>monthly contribution and growth for each account</b> in the Accounts section below — totals, tax treatment, and progress to your target appear in the live panel on the right.</p>`;
+  else if (mode === 'accounts') inputs = field({ path: 'savings.targetRatePct', label: 'Target savings rate', hint: '% of gross income — the goal to hit', type: 'percent' })
+    + `<p class="budget-note">Set each contribution <b>on the account itself</b> in the Accounts section below — the 401(k) as a <b>% of salary with its employer match</b>, a Roth or brokerage as <b>$ per month</b>. Every deposit grows inside its own account, and the totals appear live on the right.</p>`;
   else inputs = fieldRow({ path: 'savings.annualSavings', label: 'Annual savings', type: 'currency' }, { path: 'savings.employerMatch', label: 'Employer match', type: 'currency' }) + split;
   return `<div class="block-head"><span class="block-title">Savings</span>${modeSeg('set-sav-mode', mode, [['percent', '% of income'], ['accounts', 'By account'], ['dollar', '$ per year']])}</div>
     ${inputs}
@@ -1120,10 +1186,28 @@ function assetRow(a, i) {
   const byAccount = (STATE.savings || {}).mode === 'accounts';
   const canContribute = CONTRIB_TYPES.includes(a.type);
   const defGrowth = (STATE.assumptions && STATE.assumptions.preReturn != null) ? STATE.assumptions.preReturn : 6;
+  const pctMode = a.contribMode === 'pct';
+  const isPlan = a.type === 'traditional' || a.type === 'roth';        // workplace-style accounts can contribute a % of salary
+  const spIncl = (STATE.household.spouse || {}).included;
+  const owner = a.owner || (isPlan ? 'client' : 'household');
+  const ownerWages = ownerWagesNow(owner);
+  const pctEcho = pctMode ? `<div class="annual-echo" data-acct-echo="${i}">${ownerWages > 0 ? '= ' + fmt$(ownerWages * (+a.contribPct || 0) / 100 / 12) + '/mo today' : '&nbsp;'}</div>` : '';
+  const ownerSel = spIncl && canContribute ? `<div class="rr-cell"><label>Whose account</label><select data-arr="assets" data-idx="${i}" data-key="owner" data-vtype="text">
+      <option value="client" ${owner === 'client' ? 'selected' : ''}>${escapeHtml((STATE.household.client.name || 'Client').split(' ')[0])}</option>
+      <option value="spouse" ${owner === 'spouse' ? 'selected' : ''}>${escapeHtml((STATE.household.spouse.name || 'Spouse').split(' ')[0])}</option>
+      <option value="household" ${owner === 'household' ? 'selected' : ''}>Joint</option></select></div>` : '';
+  const contribInput = pctMode
+    ? `<div class="rr-cell"><label>Contribution — % of salary</label><div class="control has-suffix"><input type="number" step="0.5" min="0" max="100" data-arr="assets" data-idx="${i}" data-key="contribPct" data-vtype="percent" value="${a.contribPct != null && a.contribPct !== '' ? a.contribPct : ''}" placeholder="6"><span class="suffix">%</span></div>${pctEcho}</div>`
+    : `<div class="rr-cell"><label>Saving / month ($)</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="contribution" data-money value="${moneyDisplay(a.contribution || 0)}"></div></div>`;
+  const segBtn = (v, l) => `<button type="button" class="seg-btn ${(pctMode ? 'pct' : 'dollar') === v ? 'on' : ''}" data-action="acct-contrib-mode" data-idx="${i}" data-mode="${v}">${l}</button>`;
+  const modeToggle = isPlan ? `<div class="rr-cell"><label>Contribute as</label><span class="seg mode-seg" role="group">${segBtn('dollar', '$ / mo')}${segBtn('pct', '% of salary')}</span></div>` : '';
+  const matchCells = a.type === 'traditional' ? `
+      <div class="rr-cell"><label>Employer match</label><div class="control has-suffix"><input type="number" step="5" min="0" max="200" data-arr="assets" data-idx="${i}" data-key="matchPct" data-vtype="percent" value="${a.matchPct != null && a.matchPct !== '' ? a.matchPct : ''}" placeholder="0"><span class="suffix">% of contrib.</span></div></div>
+      <div class="rr-cell"><label>Match up to</label><div class="control has-suffix"><input type="number" step="0.5" min="0" max="25" data-arr="assets" data-idx="${i}" data-key="matchCapPct" data-vtype="percent" value="${a.matchCapPct != null && a.matchCapPct !== '' ? a.matchCapPct : ''}" placeholder="0"><span class="suffix">% of pay</span></div></div>` : '';
   const contribRow = byAccount ? `<div class="rr-grid" style="grid-column:1/-1;margin-top:.5rem">
       ${canContribute
-        ? `<div class="rr-cell"><label>Saving / month ($)</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-arr="assets" data-idx="${i}" data-key="contribution" data-money value="${moneyDisplay(a.contribution || 0)}"></div></div>
-           <div class="rr-cell"><label>Growth / yr</label><div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="assets" data-idx="${i}" data-key="growth" data-vtype="percent" value="${a.growth != null && a.growth !== '' ? a.growth : ''}" placeholder="${defGrowth}"><span class="suffix">%</span></div></div>`
+        ? `${ownerSel}${modeToggle}${contribInput}
+           <div class="rr-cell"><label>Growth / yr</label><div class="control has-suffix"><input type="number" step="0.1" min="0" data-arr="assets" data-idx="${i}" data-key="growth" data-vtype="percent" value="${a.growth != null && a.growth !== '' ? a.growth : ''}" placeholder="${defGrowth}"><span class="suffix">%</span></div></div>${matchCells}`
         : `<div class="rr-cell" style="grid-column:span 2"><label>Contributions</label><div class="rr-note" style="margin:0">${a.type === 'education' ? 'Fund this with an Education goal' : 'Held asset — no ongoing contributions'}</div></div>`}
       <div class="rr-cell"><label>Tax treatment</label><div style="padding-top:.15rem">${badge(tax[0], tax[1])}</div></div>
     </div>` : '';
@@ -1272,8 +1356,15 @@ function headBlock(eyebrow, title, sub, extra = '') {
 }
 function ensureDefaults(S) {
   const d = defaultState();
+  const hadNoSavMode = S.savings && S.savings.mode == null && ((+S.savings.annualSavings || 0) > 0 || (+S.savings.employerMatch || 0) > 0);
   ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'debtStrategy', 'withdrawalStrategy', 'pensionElection', 'charitableStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
   S.expenses.budget = Object.assign({}, d.expenses.budget, S.expenses.budget);   // deep-merge budget categories for older plans
+  if (hadNoSavMode) S.savings.mode = 'dollar';                                   // pre-modes plans keep their annual-dollar savings
+  if (S.savings.mode === 'accounts' && (+S.savings.matchPct || 0) > 0 && (S.assets || []).length &&
+      !(S.assets || []).some(a => (+a.matchPct || 0) > 0)) {                     // move the old global match onto the largest 401(k)/IRA row
+    const trads = (S.assets || []).filter(a => a.type === 'traditional').sort((x, y) => (+y.balance || 0) - (+x.balance || 0));
+    if (trads.length) { trads[0].matchPct = +S.savings.matchPct; trads[0].matchCapPct = +S.savings.matchLimitPct || 0; S.savings.matchPct = 0; S.savings.matchLimitPct = 0; }
+  }
   S.household = S.household || d.household;
   S.household.client = Object.assign({}, d.household.client, S.household.client);
   S.household.spouse = Object.assign({}, d.household.spouse, S.household.spouse);
@@ -1503,10 +1594,11 @@ function buildProfile() {
     collapsiblePanel('income', 'Income', `
       ${fieldRow({ path: 'income.clientSalary', label: 'Client salary', type: 'currency' }, spOn ? { path: 'income.spouseSalary', label: 'Spouse salary', type: 'currency' } : { path: 'income.otherIncome', label: 'Other income', type: 'currency' })}
       ${spOn ? fieldRow({ path: 'income.otherIncome', label: 'Other income', type: 'currency' }, { path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' }) : field({ path: 'income.salaryGrowth', label: 'Salary growth', type: 'percent' })}
-      ${sectionLabel('Guaranteed retirement income (annual, today’s $)')}
-      ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', type: 'currency' }, spOn ? { path: 'income.ssSpouse', label: 'Social Security — spouse', type: 'currency' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
-      ${fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' }, spOn ? { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' } : { path: 'income.pension', label: 'Pension', type: 'currency' })}
-      ${spOn ? field({ path: 'income.pension', label: 'Pension', type: 'currency' }) : ''}`, { status: st.income }) +
+      ${sectionLabel('Guaranteed retirement income — enter monthly amounts')}
+      ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', hint: 'per month', type: 'monthly' }, spOn ? { path: 'income.ssSpouse', label: 'Social Security — spouse', hint: 'per month', type: 'monthly' } : { path: 'income.pension', label: 'Pension', hint: 'per month', type: 'monthly' })}
+      ${fieldRow({ path: 'income.ssClaimClient', label: 'SS claim age — client', hint: 'if already receiving, their current age', type: 'age' }, spOn ? { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' } : { path: 'income.pensionCola', label: 'Pension COLA', hint: '0 = level payment', type: 'percent' })}
+      ${spOn ? fieldRow({ path: 'income.pension', label: 'Pension', hint: 'per month', type: 'monthly' }, { path: 'income.pensionCola', label: 'Pension COLA', hint: '0 = level payment', type: 'percent' }) : ''}
+      <p class="budget-note">Not claiming Social Security yet? Enter the <b>ssa.gov estimate at full retirement age (67)</b> — the plan adjusts it up or down for the claim age you choose. Already receiving benefits? Enter <b>what actually arrives each month</b> and set the claim age to when they started (or their current age).</p>`, { status: st.income }) +
     collapsiblePanel('expenses', 'Expenses & Savings', `
       ${expensesBlock()}
       <div class="block-divider"></div>
@@ -1588,7 +1680,7 @@ function budgetSnapshot(R) {
   const mIncome = R.grossIncome / 12, mLiving = R.annualExp / 12;
   const liabs = STATE.liabilities || [], SV = STATE.savings;
   const mDebt = liabs.reduce((s, l) => s + (+l.payment || 0), 0);
-  const mSave = (SV.mode === 'percent' ? (+SV.savingsRatePct || 0) / 100 * R.grossIncome : (+SV.annualSavings || 0)) / 12;
+  const mSave = ((R.rows && R.rows[0] ? R.rows[0].savedToAccounts : 0) || 0) / 12;   // engine truth — works in every savings mode
   const mTax = (R.rows && R.rows[0] ? R.rows[0].taxes : 0) / 12;
   const mLeft = mIncome - mLiving - mDebt - mSave - mTax;
   const items = [
@@ -1609,24 +1701,46 @@ function budgetSnapshot(R) {
     ${mDebt > 0 ? `<p class="budget-note" style="margin-top:.55rem"><b>${fmt$(mDebt)}/mo</b> of loan payments (from ${liabs.length} liabilit${liabs.length === 1 ? 'y' : 'ies'}) are added on top of living expenses — your mortgage belongs in Liabilities, not the budget above.</p>` : '<p class="budget-note" style="margin-top:.55rem">No liabilities entered. Add a mortgage or loan in the Liabilities section and its payment flows in here automatically.</p>'}
   `, { sub: 'Where the money goes', hideKey: 'prof-budget' });
 }
+/* Today's wages for an account's owner — % of salary means THAT person's salary. */
+function ownerWagesNow(owner) {
+  const I = STATE.income || {}, spIncl = (STATE.household.spouse || {}).included;
+  const wc = +I.clientSalary || 0, ws = spIncl ? (+I.spouseSalary || 0) : 0;
+  return owner === 'spouse' ? ws : owner === 'household' ? wc + ws : wc;
+}
+/* Per-account monthly contribution + employer match, evaluated at today's wages (mirrors the engine's year-1 math). */
+function acctContribNow(a) {
+  if (!CONTRIB_TYPES.includes(a.type)) return { mo: 0, matchMo: 0, rule: '' };
+  const owner = a.owner || (a.type === 'traditional' || a.type === 'roth' ? 'client' : 'household');
+  const wages = ownerWagesNow(owner);
+  const mo = a.contribMode === 'pct' ? wages * (+a.contribPct || 0) / 100 / 12 : (+a.contribution || 0);
+  let matchMo = 0;
+  if (a.type === 'traditional' && (+a.matchPct || 0) > 0 && wages > 0 && mo > 0) {
+    const rate = Math.min((mo * 12) / wages, (+a.matchCapPct || 0) / 100);
+    matchMo = wages * rate * ((+a.matchPct || 0) / 100) / 12;
+  }
+  const rule = a.contribMode === 'pct' ? `${+a.contribPct || 0}% of salary` : `${fmt$(mo)}/mo`;
+  return { mo, matchMo, rule };
+}
 function savingsByAccountPanel(R) {
   if ((STATE.savings || {}).mode !== 'accounts') return '';
-  const accts = (STATE.assets || []).filter(a => CONTRIB_TYPES.includes(a.type) && (+a.contribution || 0) > 0);
-  if (!accts.length) return `<div style="height:1rem"></div>` + panel('Savings by Account', '<div class="empty">Switch an account on and enter a monthly contribution to see your savings broken out here.</div>', { sub: 'By account', hideKey: 'prof-sba' });
+  const wages = R.grossIncome || 0;
+  const accts = (STATE.assets || []).map(a => ({ a, c: acctContribNow(a) })).filter(x => x.c.mo > 0 || x.c.matchMo > 0);
+  if (!accts.length) return `<div style="height:1rem"></div>` + panel('Savings by Account', '<div class="empty">Enter a contribution on an account below — the 401(k) as a % of salary with its match, a Roth or brokerage in $/month — and the totals appear here.</div>', { sub: 'By account', hideKey: 'prof-sba' });
   const cls = t => t === 'roth' ? ['Roth · tax-free', 'good'] : t === 'traditional' ? ['Tax-deferred', 'gold'] : ['Taxable', 'ink'];
-  const grp = { free: 0, def: 0, tax: 0 };
-  accts.forEach(a => { const c = +a.contribution || 0; if (a.type === 'roth') grp.free += c; else if (a.type === 'traditional') grp.def += c; else grp.tax += c; });
-  const totMo = grp.free + grp.def + grp.tax, rate = R.grossIncome > 0 ? (totMo * 12) / R.grossIncome : 0;
+  const grp = { free: 0, def: 0, tax: 0 }; let totMo = 0, matchMo = 0;
+  accts.forEach(({ a, c }) => { totMo += c.mo; matchMo += c.matchMo; if (a.type === 'roth') grp.free += c.mo; else if (a.type === 'traditional') grp.def += c.mo + c.matchMo; else grp.tax += c.mo; });
+  const rate = wages > 0 ? (totMo * 12) / wages : 0;
   const target = (+STATE.savings.targetRatePct || 0) / 100;
-  const rows = accts.map(a => { const [l, t] = cls(a.type); return `<div class="cf-bd-row"><span>${escapeHtml(a.name || 'Account')} ${badge(l, t)}</span><b class="amount">${fmt$(+a.contribution || 0)}/mo</b></div>`; }).join('');
+  const rows = accts.map(({ a, c }) => { const [l, t] = cls(a.type); return `<div class="cf-bd-row"><span>${escapeHtml(a.name || 'Account')} ${badge(l, t)}<span style="color:var(--faint);font-size:.7rem"> · ${c.rule}</span></span><b class="amount">${fmt$(c.mo)}/mo</b></div>`
+    + (c.matchMo > 0 ? `<div class="cf-bd-row" style="padding-left:1rem"><span style="color:var(--good)">↳ employer match</span><b class="amount" style="color:var(--good)">+${fmt$(c.matchMo)}/mo</b></div>` : ''); }).join('');
   const taxRow = (label, v, color) => v > 0 ? `<div class="cf-bd-row"><span><i class="dot" style="background:${color}"></i>${label}</span><b class="amount">${fmt$(v)}/mo</b></div>` : '';
   const msg = target > 0
-    ? (rate >= target ? `✓ Hitting your ${pct(target * 100, 0)} target — saving ${fmt$(totMo)}/mo (${fmt$(totMo * 12)}/yr).`
-      : `▲ ${pct((target - rate) * 100, 1)} below your ${pct(target * 100, 0)} target — about <b>${fmt$(Math.max(0, (target - rate) * R.grossIncome / 12))}/mo</b> more gets you there.`)
-    : `Saving ${fmt$(totMo)}/mo (${pct(rate * 100, 1)} of income). Set a target rate in the Savings section.`;
+    ? (rate >= target ? `✓ Hitting your ${pct(target * 100, 0)} target — saving ${fmt$(totMo)}/mo${matchMo > 0 ? ` + ${fmt$(matchMo)}/mo employer match` : ''} (${fmt$((totMo + matchMo) * 12)}/yr all-in).`
+      : `▲ ${pct((target - rate) * 100, 1)} below your ${pct(target * 100, 0)} target — about <b>${fmt$(Math.max(0, (target - rate) * wages / 12))}/mo</b> more gets you there.${matchMo > 0 ? ` Employer adds ${fmt$(matchMo)}/mo on top.` : ''}`)
+    : `Saving ${fmt$(totMo)}/mo (${pct(rate * 100, 1)} of income)${matchMo > 0 ? ` + ${fmt$(matchMo)}/mo match` : ''}. Set a target rate in the Savings section.`;
   return `<div style="height:1rem"></div>` + panel('Savings by Account', `
     ${rows}
-    <div class="section-label">By tax treatment</div>
+    <div class="section-label">Where it lands (incl. match)</div>
     ${taxRow('Tax-free (Roth)', grp.free, 'var(--good)')}${taxRow('Tax-deferred', grp.def, 'var(--gold)')}${taxRow('Taxable', grp.tax, 'var(--ink)')}
     <div class="section-label">Savings rate</div>
     ${progressBar(`${pct(rate * 100, 1)} saved${target > 0 ? ` · ${pct(target * 100, 0)} target` : ''}`, target > 0 ? rate / target : rate / 0.15, { tone: (target > 0 ? rate >= target : rate >= 0.15) ? 'good' : rate >= 0.1 ? 'warn' : 'bad' })}
@@ -1897,6 +2011,24 @@ function methodologyPanel() {
     <p class="rp-disclaimer" style="margin-top:.55rem">All figures are hypothetical estimates for planning conversation — not tax, legal, or investment advice. Tax rules are simplified (notably: portfolio draws that cover working-year shortfalls are not taxed, and account-level future balances are estimates within their tax bucket).</p>
   `, { sub: 'How this plan works', hideKey: 'found-method', cls: 'advisor-only' });
 }
+/* The first retirement year, spelled out — spending − guaranteed income + taxes = the real withdrawal.
+   This is the line that answers "why doesn't 6% just work?" in the meeting. */
+function withdrawalExplainer(R) {
+  const r1 = (R.rows || []).find(r => r.phase === 'retire'); if (!r1) return '';
+  const startBal = r1.t > 0 ? (R.rows[r1.t - 1].end || 0) : R.investable;
+  const guaranteed = (r1.ss || 0) + (r1.pension || 0) + (r1.annuity || 0);
+  const spend = (r1.need || 0);
+  const gross = (r1.withdrawal || 0) + (r1.rmdW || 0);
+  const wRate = startBal > 0 ? gross / startBal : 0;
+  if (spend <= 0) return '';
+  const line = (l, v, cls) => `<div class="cf-bd-row"><span>${l}</span><b class="amount ${cls || ''}">${v}</b></div>`;
+  return `<div class="section-label">First year of retirement — the real withdrawal</div>
+    ${line('Spending need (incl. debts & goals)', fmt$(spend))}
+    ${line('Guaranteed income (SS · pension · annuity)', '− ' + fmt$(guaranteed))}
+    ${line('Estimated taxes that year', '+ ' + fmt$(r1.taxes || 0))}
+    ${line('<b>Portfolio withdrawal</b>', fmt$(gross), wRate > 0.055 ? 'neg' : 'pos')}
+    <p class="budget-note" style="margin-top:.45rem">That’s <b>${pct(wRate * 100, 1)}</b> of the portfolio in year one, growing with inflation — at the plan’s ${pct(+STATE.assumptions.postReturn || 0, 1)} in-retirement return. Taxes are the piece most people forget: the gap between spending and guaranteed income must be grossed up to cover them.</p>`;
+}
 function renderFoundational() {
   const R = RESULTS;
   const sources = [
@@ -1923,6 +2055,7 @@ function renderFoundational() {
           ${statCard('Capital Needed', fmt$(R.capitalNeeded), { small: true, note: R.alreadyRetired ? 'remaining lifetime' : undefined })}
           ${statCard(R.alreadyRetired ? 'Current Portfolio' : 'Projected at Retire', fmt$(R.projAtRet), { small: true, tone: tone(R.fundedRatio) })}</div>
         ${progressBar('Funded ratio', R.fundedRatio, {})}
+        ${withdrawalExplainer(R)}
         <div class="section-label">Retirement income sources (first year)</div>${donut(sources, { size: 160 })}`, { hideKey: 'found-ret' })}
     </div>
     <div style="height:1.1rem"></div>
@@ -2316,10 +2449,11 @@ function buildIntake() {
       ${fieldRow({ path: 'household.client.retireAge', label: 'Retirement age', type: 'age' }, { path: 'household.client.lifeExpectancy', label: 'Life expectancy', type: 'age' })}
       ${spOn ? fieldRow({ path: 'household.spouse.retireAge', label: 'Spouse retirement age', type: 'age' }, { path: 'household.spouse.lifeExpectancy', label: 'Spouse life expectancy', type: 'age' }) : ''}
       ${field({ path: 'expenses.retirementExpensePct', label: 'Retirement spending', hint: '% of today', type: 'percent' })}
-      ${sectionLabel('Desired guaranteed income (annual, today’s $)')}
-      ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', type: 'currency' }, { path: 'income.ssClaimClient', label: 'SS claim age — client', type: 'age' })}
-      ${spOn ? fieldRow({ path: 'income.ssSpouse', label: 'Social Security — spouse', type: 'currency' }, { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' }) : ''}
-      ${field({ path: 'income.pension', label: 'Pension', type: 'currency' })}`) +
+      ${sectionLabel('Guaranteed retirement income — enter monthly amounts')}
+      ${fieldRow({ path: 'income.ssClient', label: 'Social Security — client', hint: 'per month', type: 'monthly' }, { path: 'income.ssClaimClient', label: 'SS claim age — client', hint: 'if already receiving, their current age', type: 'age' })}
+      ${spOn ? fieldRow({ path: 'income.ssSpouse', label: 'Social Security — spouse', hint: 'per month', type: 'monthly' }, { path: 'income.ssClaimSpouse', label: 'SS claim age — spouse', type: 'age' }) : ''}
+      ${fieldRow({ path: 'income.pension', label: 'Pension', hint: 'per month', type: 'monthly' }, { path: 'income.pensionCola', label: 'Pension COLA', hint: '0 = level payment', type: 'percent' })}
+      <p class="budget-note">Not claiming yet? Enter the <b>ssa.gov estimate at full retirement age (67)</b>. Already receiving? Enter <b>what arrives each month</b> and set the claim age to when they started.</p>`) +
     collapsiblePanel('ih-tax', '8 · Tax Assumptions', `
       ${fieldRow({ path: 'household.filing', label: 'Tax filing', type: 'select', options: filingOpts }, { path: 'household.state', label: 'State', type: 'text', ph: 'e.g. NY' })}
       ${fieldRow({ path: 'assumptions.stateTaxRate', label: 'State income tax', type: 'percent' }, { path: 'assumptions.inflation', label: 'Inflation', type: 'percent' })}
@@ -2489,10 +2623,14 @@ function buildReport(opts) {
     const rows = CF_GRANULARITY === 'five'
       ? R.rows.filter(r => r.t % 5 === 0 || r.age === R.retAge || r.age === R.endAge)
       : R.rows;
-    pages.push(`<div class="report-page">${rpHead('Cash-Flow Projection')}
+    const PER_PAGE = 28, nPages = Math.ceil(rows.length / PER_PAGE) || 1;   // paginate every-year tables across sheets
+    for (let pi = 0; pi < rows.length; pi += PER_PAGE) {
+      const chunk = rows.slice(pi, pi + PER_PAGE), pageNo = Math.floor(pi / PER_PAGE) + 1, last = pi + PER_PAGE >= rows.length;
+      pages.push(`<div class="report-page">${rpHead('Cash-Flow Projection' + (nPages > 1 ? ` · ${pageNo} of ${nPages}` : ''))}
       <table class="rp-tbl"><thead><tr><th style="text-align:left">Age</th><th style="text-align:left">Phase</th><th>Income</th><th>Spending</th><th>Taxes</th><th>Saved / Drawn</th><th>Portfolio</th></tr></thead><tbody>
-      ${rows.map(r => { const flow = r.phase === 'work' ? (r.savedToAccounts || 0) : -(r.withdrawal || 0); return `<tr><td style="text-align:left">${r.age}</td><td style="text-align:left">${r.phase === 'work' ? 'Working' : 'Retired'}</td><td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.need)}</td><td class="amount">${fmtK(r.taxes)}</td><td class="amount">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td><td class="amount">${fmtK(r.end)}</td></tr>`; }).join('')}
-      </tbody></table><p class="rp-note">Values are nominal (future dollars), reflecting ${pct(STATE.assumptions.inflation, 1)} assumed inflation.</p>${rpFoot}</div>`);
+      ${chunk.map(r => { const flow = r.phase === 'work' ? (r.savedToAccounts || 0) : -(r.withdrawal || 0); return `<tr><td style="text-align:left">${r.age}</td><td style="text-align:left">${r.phase === 'work' ? 'Working' : 'Retired'}</td><td class="amount">${fmtK(r.income)}</td><td class="amount">${fmtK(r.need)}</td><td class="amount">${fmtK(r.taxes)}</td><td class="amount">${flow >= 0 ? '+' : '−'}${fmtK(Math.abs(flow))}</td><td class="amount">${fmtK(r.end)}</td></tr>`; }).join('')}
+      </tbody></table>${last ? `<p class="rp-note">Values are nominal (future dollars), reflecting ${pct(STATE.assumptions.inflation, 1)} assumed inflation.</p>` : ''}${rpFoot}</div>`);
+    }
   }
   if (opts.tax) {
     const now = R.taxNow || {}, grossNow = (now.wages || 0) + (now.ss || 0) + (now.pension || 0) + (now.rmd || 0);
@@ -2581,6 +2719,13 @@ function handleAction(action, el) {
       if (m === 'dollar' && (+SV.annualSavings || 0) === 0 && (+SV.savingsRatePct || 0) > 0 && gi > 0) SV.annualSavings = Math.round((+SV.savingsRatePct) / 100 * gi);
       SV.mode = m; built[currentView] = false; RESULTS = compute(STATE); showView(currentView); scheduleSave(); break;
     }
+    case 'acct-contrib-mode': {                                        // per-account: contribute $/mo vs % of salary
+      const a = (STATE.assets || [])[+el.dataset.idx]; if (!a) break;
+      const m = el.dataset.mode, wages = ownerWagesNow(a.owner || (a.type === 'traditional' || a.type === 'roth' ? 'client' : 'household'));
+      if (m === 'pct' && (+a.contribPct || 0) === 0 && (+a.contribution || 0) > 0 && wages > 0) a.contribPct = +(((+a.contribution) * 12) / wages * 100).toFixed(1);
+      if (m === 'dollar' && (+a.contribution || 0) === 0 && (+a.contribPct || 0) > 0 && wages > 0) a.contribution = Math.round(wages * (+a.contribPct) / 100 / 12);
+      a.contribMode = m; rebuildAssets(); recompute(); break;
+    }
     case 'open-report': openReport(); break;
     case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0, insuranceMult: 1, ltcCoverage: 0 }; built.decision = false; showView('decision'); break;
     case 'hidesec': STATE.presentation.hidden[el.dataset.key] = el.checked; scheduleSave(); recompute(); break;
@@ -2611,12 +2756,14 @@ function handleAction(action, el) {
 function onInput(e) {
   const t = e.target;
   const readVal = el => el.hasAttribute('data-money')
-    ? parseMoney(el.value)
+    ? parseMoney(el.value) * (el.hasAttribute('data-permonth') ? 12 : 1)   // monthly-first fields store the annual figure
     : (['number', 'currency', 'percent', 'age'].includes(el.getAttribute('data-vtype') || 'text')
         ? (el.value === '' ? 0 : (isNaN(parseFloat(el.value)) ? 0 : parseFloat(el.value))) : el.value);
   if (t.matches('[data-path]')) {
     const p = t.getAttribute('data-path');
-    setPath(STATE, p, readVal(t));
+    const val = readVal(t);
+    setPath(STATE, p, val);
+    if (t.hasAttribute('data-permonth')) $$(`[data-echo-for="${p}"]`).forEach(el => el.innerHTML = val > 0 ? '= ' + fmt$(val) + ' per year' : '&nbsp;');
     if (p === 'household.client.name') { updateHeader(); renderPlanMenu(); }
     recompute(); return;
   }
@@ -2627,6 +2774,11 @@ function onInput(e) {
       const l = STATE.liabilities[i], p = Math.round(loanPayment(+l.balance || 0, +l.rate || 0, +l.term || 0));
       if (p > 0) { l.payment = p; $$(`[data-arr="liabilities"][data-idx="${i}"][data-key="payment"]`).forEach(el => el.value = moneyDisplay(p)); }
     }
+    if (arr === 'assets' && key === 'contribPct') {                   // live "$/mo today" echo under the % field
+      const a = STATE.assets[i], w = ownerWagesNow(a.owner || (a.type === 'traditional' || a.type === 'roth' ? 'client' : 'household'));
+      $$(`[data-acct-echo="${i}"]`).forEach(el => el.innerHTML = w > 0 ? '= ' + fmt$(w * (+a.contribPct || 0) / 100 / 12) + '/mo today' : '&nbsp;');
+    }
+    if (arr === 'assets' && key === 'owner') rebuildAssets();         // owner drives the %-of-salary math shown on the row
     recompute();
     if (arr === 'goals' && key === 'type') rebuildGoals();
     if (arr === 'events' && key === 'type') rebuildEvents();

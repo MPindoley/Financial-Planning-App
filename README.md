@@ -16,7 +16,7 @@ Eight modules, mapped to the way you actually run a planning conversation:
 | Module | Purpose |
 | --- | --- |
 | **Dashboard** | A client-friendly command center with a **Probability of Success** headline (Monte Carlo), an **interactive plan timeline** — drag the year scrubber to walk through every year and watch the portfolio, income mix, taxes, and life-stage milestones update live — and a **Before / After compare** (save a baseline, apply a recommendation, show the impact instantly). Plus KPIs, goal funding, and top insights. |
-| **Client Profile** | Capture the household's full picture — people, income, expenses, savings, accounts, debts, insurance, and assumptions. A live **Fact Finder** checklist shows what's still missing or needs a follow-up question, so you collect everything in the meeting. Everything else is driven from here. |
+| **Client Profile** | Capture the household's full picture — people, income, expenses, savings, accounts, debts, insurance, and assumptions. **Client-friendly entry:** spending, Social Security, and pensions are asked **per month** (the way clients actually know them) with the annual figure echoed underneath; savings are set **on each account** — the 401(k) as a % of salary with its employer match, a Roth or brokerage as $/month — so deposits are linked to the exact account that grows. A live **Fact Finder** checklist shows what's still missing. |
 | **Needs Analysis** | Fast, single-goal estimates (retirement, education, protection) to **engage prospects quickly** and create immediate impact. |
 | **Goals & Cash Flow** | Combine goals-based funding with comprehensive, year-by-year cash-flow planning. |
 | **Foundational Planning** | The holistic full picture — net worth, allocation, retirement outlook, goal funding, and a **Monte Carlo** panel (600 randomized-return simulations) with a probability-of-success gauge and a 10th–90th-percentile outcome fan chart. |
@@ -39,7 +39,15 @@ growth, and taxes are modeled realistically:
   pay down over time and flow through net worth and cash flow.
 - **Roth conversions** can "fill up" a target bracket each year during a window you
   choose; the analyzer compares lifetime taxes and ending estate with vs. without.
-- **Savings** are split across pre-tax / Roth / taxable per your inputs.
+- **Savings** route to the specific accounts you set — a 401(k) % of its owner's
+  salary (with that plan's employer match), Roth or brokerage in $/month — and stop
+  when that person's paychecks stop. Legacy % / $-per-year modes still work.
+- **Social Security** entered as the FRA-67 estimate is scaled for the claim age you
+  pick; a benefit the client is **already receiving** is used exactly as entered.
+  Pensions are **level by default** (set a COLA only if the plan actually has one).
+- **The funded ratio is tax-honest**: the capital a retirement needs is grossed up
+  for the taxes each withdrawal creates, so "Retirement funded", the cash-flow
+  timeline, and Monte Carlo all tell one consistent story.
 
 ### Built for the meeting room
 

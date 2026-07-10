@@ -200,6 +200,7 @@ input:hover,select:hover,textarea:hover{background-color:rgba(240,234,222,.7);bo
 input:focus,select:focus,textarea:focus{outline:none;border-color:var(--gold);background-color:var(--paper);box-shadow:0 0 0 3px rgba(200,164,106,.2)}
 input[type=number]{-moz-appearance:textfield}
 textarea{resize:vertical;min-height:90px;line-height:1.6}
+.annual-echo{font-size:.7rem;color:var(--gold-deep);font-weight:600;margin-top:.3rem;min-height:.95rem;font-variant-numeric:tabular-nums}
 .field-row{display:grid;grid-template-columns:1fr 1fr;gap:.7rem}
 .field-row.three{grid-template-columns:repeat(3,1fr)}
 @media(max-width:520px){.field-row,.field-row.three{grid-template-columns:1fr}}
