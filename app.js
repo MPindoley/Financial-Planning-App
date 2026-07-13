@@ -127,6 +127,11 @@ function defaultState() {
     charitableStrategy: { on: false, qcd: 0 },
     advisorNotes: '',
     estate: { legacyTarget: 0, annualGifting: 0, charitableGoal: 0, hasWill: false, hasTrust: false, hasPOA: false, hasHealthDirective: false, beneficiariesConfirmed: false, estateNote: '' },
+    portfolios: {
+      settings: { mode: 'plan', trials: 800, years: 30, start: 0, annual: 0 },
+      current:  { name: 'Current portfolio',  holdings: [{ id: uid(), ticker: 'SPY', weight: 60 }, { id: uid(), ticker: 'AGG', weight: 40 }] },
+      proposed: { name: 'Proposed portfolio', holdings: [{ id: uid(), ticker: 'VTI', weight: 40 }, { id: uid(), ticker: 'VXUS', weight: 15 }, { id: uid(), ticker: 'BND', weight: 35 }, { id: uid(), ticker: 'SCHD', weight: 10 }] }
+    },
     ui: { collapsed: false }
   };
 }
@@ -603,19 +608,22 @@ function randNormal(mean, sd) {
   let u = 0, v = 0; while (!u) u = Math.random(); while (!v) v = Math.random();
   return mean + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
 }
-function monteCarlo(S, trials) {
+function monteCarlo(S, trials, ov) {
   trials = trials || 600;
   const A = S.assumptions;
-  const pre = blendedPreReturn(S), post = A.postReturn / 100;
-  const volPre = (A.volatilityPre != null ? +A.volatilityPre : 12) / 100;
-  const volPost = (A.volatilityPost != null ? +A.volatilityPost : 9) / 100;
+  const pre = ov && ov.mean != null ? ov.mean : blendedPreReturn(S);
+  const post = ov && ov.mean != null ? ov.mean : A.postReturn / 100;   // a portfolio override holds one allocation through retirement
+  const volPre = ov && ov.vol != null ? ov.vol : (A.volatilityPre != null ? +A.volatilityPre : 12) / 100;
+  const volPost = ov && ov.vol != null ? ov.vol : (A.volatilityPost != null ? +A.volatilityPost : 9) / 100;
   const sampler = retired => Math.max(-0.6, randNormal(retired ? post : pre, retired ? volPost : volPre));
   const base = simulate(S);
   const ages = base.rows.map(r => r.age);
-  const paths = []; let successes = 0;
+  const lastAge = ages[ages.length - 1];
+  const paths = []; let successes = 0; const deplAges = [];
   for (let i = 0; i < trials; i++) {
     const sim = simulate(S, { sampleReturn: sampler });
     if (sim.depletionAge == null) successes++;
+    deplAges.push(sim.depletionAge == null ? lastAge + 1 : sim.depletionAge);
     paths.push(sim.rows.map(r => r.end));
   }
   const n = ages.length;
@@ -630,9 +638,11 @@ function monteCarlo(S, trials) {
   };
   const endings = paths.map(p => p[n - 1]).sort((a, b) => a - b);
   const q = pPct => endings[Math.floor(trials * pPct)] || 0;
-  return { trials, success: successes / trials, ages,
+  deplAges.sort((a, b) => a - b);
+  const deplP10 = deplAges[Math.floor(trials * 0.10)];               // in the worst decile of markets, money lasts to this age
+  return { trials, success: successes / trials, ages, lastAge,
     p10: bandAt(0.10), p50: bandAt(0.50), p90: bandAt(0.90),
-    endP10: q(0.10), endP50: q(0.50), endP90: q(0.90) };
+    endP10: q(0.10), endP50: q(0.50), endP90: q(0.90), deplP10 };
 }
 function mcSignature(S) {
   return JSON.stringify([S.assumptions, S.household, S.income, S.expenses, S.savings, S.savingsSplit, S.assets, S.liabilities, S.events, S.goals, S.rothStrategy, S.debtStrategy, S.withdrawalStrategy, S.survivor, S.disability, S.pensionElection, S.charitableStrategy]);
@@ -652,6 +662,154 @@ function mcAsync(onReady) {
   const sig = mcSignature(STATE), hit = MC_MULTI.get(sig);
   if (hit) return hit;
   setTimeout(() => { mcFor(STATE, 600); if (onReady) onReady(); }, 0);
+  return null;
+}
+
+/* ============================ PORTFOLIO LAB ================================
+   Ticker-level portfolios → expected return / volatility via asset-class
+   capital-market assumptions and a correlation matrix — then Monte Carlo,
+   standalone or driven through the client's full financial plan.
+   These are long-run PLANNING assumptions (editable), not live market data. */
+const ASSET_CLASSES = {
+  usL:   { label: 'US Large Cap',        ret: 7.2, vol: 15.5 },
+  usS:   { label: 'US Small / Mid',      ret: 7.7, vol: 19.5 },
+  intl:  { label: 'Intl Developed',      ret: 7.0, vol: 16.5 },
+  em:    { label: 'Emerging Markets',    ret: 7.8, vol: 21.0 },
+  bond:  { label: 'Core Bonds',          ret: 4.6, vol: 5.5 },
+  tsy:   { label: 'Treasuries / TIPS',   ret: 4.2, vol: 6.0 },
+  hy:    { label: 'High Yield / Credit', ret: 5.8, vol: 9.0 },
+  reit:  { label: 'Real Estate (REIT)',  ret: 6.8, vol: 18.5 },
+  gold:  { label: 'Gold / Metals',       ret: 4.5, vol: 15.5 },
+  cmd:   { label: 'Commodities',         ret: 4.8, vol: 16.0 },
+  cash:  { label: 'Cash / T-Bills',      ret: 3.0, vol: 0.8 },
+  bal:   { label: 'Balanced Fund',       ret: 6.2, vol: 10.0 },
+  crypto:{ label: 'Crypto',              ret: 9.0, vol: 65.0 },
+  custom:{ label: 'Custom / Other',      ret: 6.0, vol: 12.0 }
+};
+const CLS_CORR = {   // upper triangle; symmetric lookup below (planning-grade correlations)
+  usL:  { usS: .92, intl: .85, em: .75, bond: .10, tsy: -.10, hy: .60, reit: .70, gold: .05, cmd: .30, cash: 0,   bal: .95, crypto: .40, custom: .60 },
+  usS:  { intl: .80, em: .72, bond: .05, tsy: -.15, hy: .62, reit: .72, gold: .02, cmd: .30, cash: 0,   bal: .85, crypto: .40, custom: .60 },
+  intl: { em: .85, bond: .10, tsy: -.05, hy: .55, reit: .60, gold: .10, cmd: .30, cash: 0,   bal: .80, crypto: .35, custom: .55 },
+  em:   { bond: .05, tsy: -.05, hy: .55, reit: .55, gold: .15, cmd: .35, cash: 0,   bal: .70, crypto: .40, custom: .50 },
+  bond: { tsy: .85, hy: .45, reit: .30, gold: .25, cmd: .05, cash: .20, bal: .50, crypto: .05, custom: .30 },
+  tsy:  { hy: .20, reit: .20, gold: .30, cmd: 0,   cash: .25, bal: .30, crypto: 0,   custom: .20 },
+  hy:   { reit: .55, gold: .10, cmd: .20, cash: .05, bal: .60, crypto: .25, custom: .45 },
+  reit: { gold: .10, cmd: .20, cash: 0,   bal: .65, crypto: .30, custom: .50 },
+  gold: { cmd: .45, cash: .05, bal: .10, crypto: .25, custom: .15 },
+  cmd:  { cash: .05, bal: .30, crypto: .20, custom: .25 },
+  cash: { bal: .05, crypto: 0, custom: .05 },
+  bal:  { crypto: .30, custom: .60 },
+  crypto: { custom: .30 }
+};
+const clsCorr = (a, b) => a === b ? 1 : (CLS_CORR[a] && CLS_CORR[a][b] != null ? CLS_CORR[a][b] : (CLS_CORR[b] && CLS_CORR[b][a] != null ? CLS_CORR[b][a] : .3));
+/* Ticker → [class, name, volOverride?, retOverride?]. Singles keep the class expected return —
+   idiosyncratic risk isn't rewarded with extra expected return, which is exactly the meeting point. */
+const TICKERS = {
+  /* US broad / large */ SPY: ['usL', 'SPDR S&P 500'], IVV: ['usL', 'iShares Core S&P 500'], VOO: ['usL', 'Vanguard S&P 500'], VTI: ['usL', 'Vanguard Total Market'], ITOT: ['usL', 'iShares Total Market'], SCHB: ['usL', 'Schwab Broad Market'], QQQ: ['usL', 'Invesco Nasdaq-100', 20], QQQM: ['usL', 'Invesco Nasdaq-100', 20], DIA: ['usL', 'SPDR Dow Jones', 14], RSP: ['usL', 'Invesco Equal-Weight S&P', 16],
+  VUG: ['usL', 'Vanguard Growth', 17.5], SCHG: ['usL', 'Schwab Growth', 17.5], IWF: ['usL', 'iShares Growth', 17.5], VTV: ['usL', 'Vanguard Value', 14], SCHV: ['usL', 'Schwab Value', 14], IWD: ['usL', 'iShares Value', 14],
+  /* US small/mid */ IWM: ['usS', 'iShares Russell 2000'], VB: ['usS', 'Vanguard Small-Cap'], SCHA: ['usS', 'Schwab Small-Cap'], VTWO: ['usS', 'Vanguard Russell 2000'], MDY: ['usS', 'SPDR Mid-Cap', 17.5], VO: ['usS', 'Vanguard Mid-Cap', 17], IJH: ['usS', 'iShares Mid-Cap', 17.5],
+  /* International */ VXUS: ['intl', 'Vanguard Total Intl'], VEA: ['intl', 'Vanguard Developed'], EFA: ['intl', 'iShares EAFE'], IEFA: ['intl', 'iShares Core EAFE'], SCHF: ['intl', 'Schwab Intl'], VEU: ['intl', 'Vanguard All-World ex-US'], IXUS: ['intl', 'iShares Total Intl'], VWO: ['em', 'Vanguard Emerging Mkts'], IEMG: ['em', 'iShares Core EM'], EEM: ['em', 'iShares MSCI EM'],
+  /* Bonds */ AGG: ['bond', 'iShares Core US Bond'], BND: ['bond', 'Vanguard Total Bond'], SCHZ: ['bond', 'Schwab US Bond'], BNDX: ['bond', 'Vanguard Intl Bond', 4.5], BSV: ['bond', 'Vanguard Short-Term Bond', 3], BIV: ['bond', 'Vanguard Interm Bond', 6], BLV: ['bond', 'Vanguard Long Bond', 11], MBB: ['bond', 'iShares MBS', 4.5],
+  LQD: ['bond', 'iShares IG Corporate', 8], VCIT: ['bond', 'Vanguard Interm Corp', 6.5], VCSH: ['bond', 'Vanguard Short Corp', 3], MUB: ['bond', 'iShares Muni', 4.5, 3.9], VTEB: ['bond', 'Vanguard Muni', 4.5, 3.9],
+  TLT: ['tsy', 'iShares 20+yr Treasury', 13], VGLT: ['tsy', 'Vanguard Long Treasury', 12], IEF: ['tsy', 'iShares 7-10yr Treasury', 7], VGIT: ['tsy', 'Vanguard Interm Treasury', 5], SHY: ['tsy', 'iShares 1-3yr Treasury', 2], VGSH: ['tsy', 'Vanguard Short Treasury', 2], GOVT: ['tsy', 'iShares US Treasury', 5],
+  TIP: ['tsy', 'iShares TIPS', 6, 4.3], VTIP: ['tsy', 'Vanguard Short TIPS', 2.5, 4.1], SCHP: ['tsy', 'Schwab TIPS', 6, 4.3],
+  HYG: ['hy', 'iShares High Yield'], JNK: ['hy', 'SPDR High Yield'],
+  BIL: ['cash', 'SPDR 1-3mo T-Bill'], SGOV: ['cash', 'iShares 0-3mo Treasury'],
+  /* Dividend / sectors */ SCHD: ['usL', 'Schwab US Dividend', 13.5], VYM: ['usL', 'Vanguard High Dividend', 13.5], VIG: ['usL', 'Vanguard Dividend Growth', 13.5], DVY: ['usL', 'iShares Select Dividend', 14], NOBL: ['usL', 'ProShares Aristocrats', 14], HDV: ['usL', 'iShares Core High Div', 13.5],
+  XLK: ['usL', 'Tech Select SPDR', 21], VGT: ['usL', 'Vanguard Info Tech', 21], SMH: ['usL', 'VanEck Semiconductor', 28], SOXX: ['usL', 'iShares Semiconductor', 28], XLE: ['usL', 'Energy SPDR', 22], XLF: ['usL', 'Financials SPDR', 19], XLV: ['usL', 'Health Care SPDR', 14], XLI: ['usL', 'Industrials SPDR', 16], XLY: ['usL', 'Cons Discretionary SPDR', 18], XLP: ['usL', 'Cons Staples SPDR', 12], XLU: ['usL', 'Utilities SPDR', 13], XLB: ['usL', 'Materials SPDR', 17], XLC: ['usL', 'Comm Services SPDR', 18], XLRE: ['reit', 'Real Estate SPDR'],
+  VNQ: ['reit', 'Vanguard Real Estate'], SCHH: ['reit', 'Schwab US REIT'], IYR: ['reit', 'iShares US Real Estate'],
+  GLD: ['gold', 'SPDR Gold'], IAU: ['gold', 'iShares Gold'], SGOL: ['gold', 'abrdn Gold'], SLV: ['gold', 'iShares Silver', 26], GDX: ['gold', 'VanEck Gold Miners', 32], DBC: ['cmd', 'Invesco Commodity'], PDBC: ['cmd', 'Invesco Optimum Commodity'],
+  IBIT: ['crypto', 'iShares Bitcoin'], FBTC: ['crypto', 'Fidelity Bitcoin'], GBTC: ['crypto', 'Grayscale Bitcoin'], BITO: ['crypto', 'ProShares Bitcoin'],
+  /* Mutual funds */ VFIAX: ['usL', 'Vanguard 500 Index'], FXAIX: ['usL', 'Fidelity 500 Index'], SWPPX: ['usL', 'Schwab S&P 500'], VTSAX: ['usL', 'Vanguard Total Stock'], FSKAX: ['usL', 'Fidelity Total Market'], SWTSX: ['usL', 'Schwab Total Market'], VTIAX: ['intl', 'Vanguard Total Intl'], VBTLX: ['bond', 'Vanguard Total Bond'], FTBFX: ['bond', 'Fidelity Total Bond'],
+  AGTHX: ['usL', 'American Growth Fund', 17], AWSHX: ['usL', 'Washington Mutual', 14.5], ANCFX: ['usL', 'Fundamental Investors', 15.5], AEPGX: ['intl', 'EuroPacific Growth', 17], ABALX: ['bal', 'American Balanced'], AMECX: ['bal', 'Income Fund of America', 9],
+  FCNTX: ['usL', 'Fidelity Contrafund', 17], FMAGX: ['usL', 'Fidelity Magellan', 17], DODGX: ['usL', 'Dodge & Cox Stock', 16], DODIX: ['bond', 'Dodge & Cox Income', 5.5],
+  PIMIX: ['hy', 'PIMCO Income', 7], PONAX: ['hy', 'PIMCO Income A', 7], PTTAX: ['bond', 'PIMCO Total Return', 6],
+  VWENX: ['bal', 'Vanguard Wellington'], VWELX: ['bal', 'Vanguard Wellington Inv'], VWINX: ['bal', 'Vanguard Wellesley', 7], PRGFX: ['usL', 'T. Rowe Growth Stock', 18], TRBCX: ['usL', 'T. Rowe Blue Chip', 18], POAGX: ['usS', 'PRIMECAP Odyssey Aggr', 20],
+  /* Single stocks (class return, single-stock risk) */ AAPL: ['usL', 'Apple', 28], MSFT: ['usL', 'Microsoft', 26], NVDA: ['usL', 'NVIDIA', 45], GOOGL: ['usL', 'Alphabet', 28], GOOG: ['usL', 'Alphabet', 28], AMZN: ['usL', 'Amazon', 30], META: ['usL', 'Meta Platforms', 35], TSLA: ['usL', 'Tesla', 55], 'BRK.B': ['usL', 'Berkshire Hathaway', 20], BRKB: ['usL', 'Berkshire Hathaway', 20],
+  JPM: ['usL', 'JPMorgan', 24], BAC: ['usL', 'Bank of America', 26], WFC: ['usL', 'Wells Fargo', 26], GS: ['usL', 'Goldman Sachs', 27], MS: ['usL', 'Morgan Stanley', 27], C: ['usL', 'Citigroup', 28], V: ['usL', 'Visa', 22], MA: ['usL', 'Mastercard', 22],
+  JNJ: ['usL', 'Johnson & Johnson', 17], PG: ['usL', 'Procter & Gamble', 16], KO: ['usL', 'Coca-Cola', 16], PEP: ['usL', 'PepsiCo', 16], WMT: ['usL', 'Walmart', 18], HD: ['usL', 'Home Depot', 22], COST: ['usL', 'Costco', 20], MCD: ['usL', 'McDonald’s', 18],
+  XOM: ['usL', 'Exxon Mobil', 26], CVX: ['usL', 'Chevron', 25], UNH: ['usL', 'UnitedHealth', 26], LLY: ['usL', 'Eli Lilly', 30], PFE: ['usL', 'Pfizer', 24], MRK: ['usL', 'Merck', 22], ABBV: ['usL', 'AbbVie', 24],
+  AVGO: ['usL', 'Broadcom', 38], AMD: ['usL', 'AMD', 48], INTC: ['usL', 'Intel', 38], ORCL: ['usL', 'Oracle', 28], CRM: ['usL', 'Salesforce', 32], NFLX: ['usL', 'Netflix', 35], DIS: ['usL', 'Disney', 26], BA: ['usL', 'Boeing', 35],
+  T: ['usL', 'AT&T', 20], VZ: ['usL', 'Verizon', 18], MO: ['usL', 'Altria', 20], PM: ['usL', 'Philip Morris', 20], SO: ['usL', 'Southern Co', 15], DUK: ['usL', 'Duke Energy', 15], NEE: ['usL', 'NextEra', 20], O: ['reit', 'Realty Income', 22]
+};
+const SINGLE_STOCK_VOL = 15.6;   // holdings with a vol override above this behave as concentrated positions in the correlation math
+function resolveHolding(h) {
+  const tk = String(h.ticker || '').trim().toUpperCase();
+  const lib = TICKERS[tk];
+  const cls = h.cls || (lib ? lib[0] : 'custom');
+  const base = ASSET_CLASSES[cls] || ASSET_CLASSES.custom;
+  const ret = h.ret != null && h.ret !== '' ? +h.ret : (lib && lib[3] != null ? lib[3] : base.ret);
+  const vol = h.vol != null && h.vol !== '' ? +h.vol : (lib && lib[2] != null ? lib[2] : base.vol);
+  const name = h.name || (lib ? lib[1] : '');
+  const single = vol > (ASSET_CLASSES[cls] ? ASSET_CLASSES[cls].vol : SINGLE_STOCK_VOL) * 1.25;
+  return { ticker: tk, known: !!lib, cls, ret, vol, name, single, weight: +h.weight || 0 };
+}
+function portfolioStats(holdings) {
+  const rs = (holdings || []).map(resolveHolding).filter(r => r.weight > 0);
+  const totW = rs.reduce((s, r) => s + r.weight, 0);
+  if (!rs.length || totW <= 0) return null;
+  rs.forEach(r => r.w = r.weight / totW);
+  const mean = rs.reduce((s, r) => s + r.w * r.ret, 0);
+  let variance = 0;
+  for (let i = 0; i < rs.length; i++) for (let j = 0; j < rs.length; j++) {
+    const a = rs[i], b = rs[j];
+    let rho;
+    if (i === j) rho = 1;
+    else if (a.cls === b.cls) rho = (a.single && b.single) ? .55 : (a.single || b.single) ? .70 : .95;
+    else rho = clsCorr(a.cls, b.cls) * ((a.single || b.single) ? .85 : 1);
+    variance += a.w * b.w * (a.vol / 100) * (b.vol / 100) * rho;
+  }
+  const byClass = {};
+  rs.forEach(r => byClass[r.cls] = (byClass[r.cls] || 0) + r.w);
+  const unknown = rs.filter(r => !r.known && !r.cls).map(r => r.ticker);
+  return { mean: mean / 100, vol: Math.sqrt(variance), holdings: rs, totW, byClass, unknown };
+}
+/* Standalone accumulation Monte Carlo — grow a lump sum (plus annual additions) under the portfolio. */
+function growthMC(start, years, annual, mean, vol, trials) {
+  trials = trials || 1500; years = Math.max(1, Math.round(years));
+  const paths = [];
+  for (let i = 0; i < trials; i++) {
+    let b = start; const p = [b];
+    for (let y = 0; y < years; y++) { b = Math.max(0, b * (1 + Math.max(-0.6, randNormal(mean, vol))) + annual); p.push(b); }
+    paths.push(p);
+  }
+  const idx = pPct => Math.min(trials - 1, Math.floor(trials * pPct));
+  const bandAt = pPct => { const out = []; for (let y = 0; y <= years; y++) { const col = paths.map(p => p[y]).sort((a, b) => a - b); out.push(col[idx(pPct)]); } return out; };
+  const endings = paths.map(p => p[years]).sort((a, b) => a - b);
+  const invested = start + annual * years;
+  return { trials, years, p10: bandAt(.10), p50: bandAt(.50), p90: bandAt(.90),
+    endP10: endings[idx(.10)], endP50: endings[idx(.50)], endP90: endings[idx(.90)],
+    lossProb: endings.filter(e => e < invested).length / trials, invested };
+}
+/* Async runner + cache: analyses keyed by portfolio + plan signature; debounced so typing stays smooth. */
+const PL_CACHE = new Map();
+let PL_TIMER = null;
+function plSignature() {
+  const P = STATE.portfolios || {};
+  return JSON.stringify([P.settings, P.current, P.proposed, mcSignature(STATE)]);
+}
+function plRunNow() {
+  const sig = plSignature();
+  if (PL_CACHE.has(sig)) return PL_CACHE.get(sig);
+  const P = STATE.portfolios, st = P.settings || {};
+  const run = pf => {
+    const stats = portfolioStats((pf || {}).holdings);
+    if (!stats) return null;
+    const res = { stats };
+    if ((st.mode || 'plan') === 'plan') res.mc = monteCarlo(STATE, +st.trials || 800, { mean: stats.mean, vol: stats.vol });
+    else res.g = growthMC(+st.start || RESULTS.investable || 100000, +st.years || 30, +st.annual || 0, stats.mean, stats.vol, 1500);
+    return res;
+  };
+  const out = { current: run(P.current), proposed: run(P.proposed) };
+  PL_CACHE.set(sig, out);
+  if (PL_CACHE.size > 6) PL_CACHE.delete(PL_CACHE.keys().next().value);
+  return out;
+}
+function plAsync(onReady) {
+  const hit = PL_CACHE.get(plSignature());
+  if (hit) return hit;
+  clearTimeout(PL_TIMER);
+  PL_TIMER = setTimeout(() => { plRunNow(); if (onReady) onReady(); }, 350);
   return null;
 }
 
@@ -1360,6 +1518,9 @@ function ensureDefaults(S) {
   ['meta', 'income', 'expenses', 'savings', 'savingsSplit', 'insurance', 'protection', 'assumptions', 'quickEducation', 'rothStrategy', 'debtStrategy', 'withdrawalStrategy', 'pensionElection', 'charitableStrategy', 'estate'].forEach(k => S[k] = Object.assign({}, d[k], S[k]));
   S.expenses.budget = Object.assign({}, d.expenses.budget, S.expenses.budget);   // deep-merge budget categories for older plans
   if (hadNoSavMode) S.savings.mode = 'dollar';                                   // pre-modes plans keep their annual-dollar savings
+  S.portfolios = S.portfolios || d.portfolios;                                   // Portfolio Lab state
+  S.portfolios.settings = Object.assign({}, d.portfolios.settings, S.portfolios.settings);
+  ['current', 'proposed'].forEach(k => { S.portfolios[k] = Object.assign({}, d.portfolios[k], S.portfolios[k]); S.portfolios[k].holdings = S.portfolios[k].holdings || []; });
   if (S.savings.mode === 'accounts' && (+S.savings.matchPct || 0) > 0 && (S.assets || []).length &&
       !(S.assets || []).some(a => (+a.matchPct || 0) > 0)) {                     // move the old global match onto the largest 401(k)/IRA row
     const trads = (S.assets || []).filter(a => a.type === 'traditional').sort((x, y) => (+y.balance || 0) - (+x.balance || 0));
@@ -2495,8 +2656,139 @@ function liveIntake() {
     ${R.alloc.length ? donut(R.alloc, { size: 160 }) : '<div class="empty">Add accounts to see allocation.</div>'}`,
     { sub: 'Live' });
 }
-const builders = { intake: buildIntake, profile: buildProfile, needs: buildNeeds, cashflow: buildCashflow, decision: buildDecision, tax: buildTax };
-const liveFns = { intake: liveIntake, dashboard: renderDashboard, profile: liveProfile, needs: liveNeeds, cashflow: liveCashflow, foundational: renderFoundational, decision: liveDecision, tax: liveTax, coplanner: renderCoplanner };
+/* ----------------------------- PORTFOLIO LAB (UI) ------------------------- */
+function plHoldingRow(pf, h, i) {
+  const r = resolveHolding(h);
+  const clsOpts = Object.keys(ASSET_CLASSES).map(k => `<option value="${k}" ${(h.cls || r.cls) === k ? 'selected' : ''}>${ASSET_CLASSES[k].label}</option>`).join('');
+  const nameTxt = r.known ? r.name : (r.ticker ? 'Unknown ticker — pick an asset class' : 'Type a ticker (SPY, VTI, AAPL…)');
+  return `<div class="repeat-row" style="grid-template-columns:110px 92px 1fr 24px;align-items:end">
+    <div class="rr-cell"><label>Ticker</label><input type="text" style="text-transform:uppercase" data-pf="${pf}" data-hidx="${i}" data-hkey="ticker" value="${escapeAttr(h.ticker || '')}" placeholder="SPY"></div>
+    <div class="rr-cell"><label>Weight</label><div class="control has-suffix"><input type="number" step="1" min="0" max="100" data-pf="${pf}" data-hidx="${i}" data-hkey="weight" data-vtype="percent" value="${h.weight != null && h.weight !== '' ? h.weight : ''}"><span class="suffix">%</span></div></div>
+    <div class="rr-cell"><label>Fund / asset class</label><div class="annual-echo" style="margin:.1rem 0 .25rem" data-pl-name="${pf}-${i}">${escapeHtml(nameTxt)}</div></div>
+    <button class="rr-del" data-action="pl-del" data-pf="${pf}" data-idx="${i}" title="Remove">×</button>
+    <div class="rr-grid" style="grid-column:1/-1">
+      <div class="rr-cell"><label>Asset class</label><select data-pf="${pf}" data-hidx="${i}" data-hkey="cls" data-vtype="text">${clsOpts}</select></div>
+      <div class="rr-cell"><label>Exp. return</label><div class="control has-suffix"><input type="number" step="0.1" data-pf="${pf}" data-hidx="${i}" data-hkey="ret" data-vtype="percent" value="${h.ret != null && h.ret !== '' ? h.ret : ''}" placeholder="${r.ret}"><span class="suffix">%</span></div></div>
+      <div class="rr-cell"><label>Volatility</label><div class="control has-suffix"><input type="number" step="0.5" min="0" data-pf="${pf}" data-hidx="${i}" data-hkey="vol" data-vtype="percent" value="${h.vol != null && h.vol !== '' ? h.vol : ''}" placeholder="${r.vol}"><span class="suffix">%</span></div></div>
+    </div></div>`;
+}
+function plEditor(pf) {
+  const P = STATE.portfolios[pf], stats = portfolioStats(P.holdings);
+  const totW = (P.holdings || []).reduce((s, h) => s + (+h.weight || 0), 0);
+  const totBadge = Math.abs(totW - 100) < 0.01 ? badge('100%', 'good') : badge(totW.toFixed(0) + '%', 'warn');
+  return panel(pf === 'current' ? 'Current Portfolio' : 'Proposed Portfolio',
+    `${field({ path: `portfolios.${pf}.name`, label: 'Label on charts & report', type: 'text' })}
+     <div id="plList-${pf}">${(P.holdings || []).map((h, i) => plHoldingRow(pf, h, i)).join('')}</div>
+     <div class="btn-row" style="align-items:center">
+       <button class="add-row" data-action="pl-add" data-pf="${pf}">＋ Add holding</button>
+       <span style="margin-left:auto;font-size:.74rem;color:var(--muted)">Weights: ${totBadge}</span>
+       <button class="btn sm" data-action="pl-normalize" data-pf="${pf}">Normalize to 100%</button>
+     </div>
+     ${stats ? `<p class="budget-note" style="margin-top:.4rem">Expected return <b>${pct(stats.mean * 100, 1)}</b> · volatility <b>${pct(stats.vol * 100, 1)}</b> — from the editable assumptions above.</p>` : ''}`,
+    { sub: pf === 'current' ? 'What he owns today' : 'Where you want him' });
+}
+function buildPortfolioLab() {
+  const st = STATE.portfolios.settings, planMode = (st.mode || 'plan') === 'plan';
+  const settings = panel('Analysis Settings', `
+    <div class="block-head"><span class="block-title">Test each portfolio</span>${modeSeg('pl-mode', planMode ? 'plan' : 'growth', [['plan', 'Through the plan'], ['growth', 'Grow a lump sum']])}</div>
+    <p class="budget-note">${planMode
+      ? '<b>Through the plan</b> runs the client’s entire financial plan — spending, Social Security, pension, taxes, RMDs, events — with each portfolio’s return and risk. Success = the money lasts to life expectancy.'
+      : '<b>Grow a lump sum</b> compounds a starting amount under each portfolio — no plan cash flows — and shows the range of outcomes.'}</p>
+    ${planMode
+      ? field({ path: 'portfolios.settings.trials', label: 'Simulations per portfolio', type: 'select', options: [{ value: 400, label: '400 — fast' }, { value: 800, label: '800 — standard' }, { value: 1500, label: '1,500 — fine' }] })
+      : fieldRow({ path: 'portfolios.settings.start', label: 'Starting amount', type: 'currency', ph: String(RESULTS.investable || 100000) }, { path: 'portfolios.settings.annual', label: 'Added each year', type: 'currency' }) +
+        field({ path: 'portfolios.settings.years', label: 'Years to grow', type: 'number', min: 1, max: 60 })}`,
+    { sub: 'Monte Carlo' });
+  getViewEl('portfolio').innerHTML = headBlock('Analytics', 'Portfolio Lab',
+    'Enter the tickers he owns and the portfolio you’d put him in — then stress-test both through hundreds of market simulations and compare success rates side by side.', collapseBtn()) +
+    `<div class="split io-split"><div class="advisor-only io-inputs">
+      ${settings}${plEditor('current')}${plEditor('proposed')}
+    </div><div id="res-portfolio"></div></div>`;
+}
+function plCompareChart(xs, A, B, opts = {}) {
+  const W = opts.w || 760, H = opts.h || 260, pad = { l: 56, r: 16, t: 16, b: 28 };
+  const xMin = xs[0], xMax = xs[xs.length - 1];
+  const hiAll = [...(A ? A.p90 : []), ...(B ? B.p90 : []), 1];
+  const yMax = Math.max(...hiAll) * 1.06;
+  const sx = x => pad.l + (x - xMin) / ((xMax - xMin) || 1) * (W - pad.l - pad.r);
+  const sy = y => H - pad.b - y / yMax * (H - pad.t - pad.b);
+  let grid = '', ylab = '';
+  for (let i = 0; i <= 4; i++) { const v = yMax * i / 4, yy = sy(v); grid += `<line class="grid-line" x1="${pad.l}" y1="${yy}" x2="${W - pad.r}" y2="${yy}"/>`; ylab += `<text class="lbl amount" x="${pad.l - 8}" y="${yy + 3}" text-anchor="end">${fmtK(v)}</text>`; }
+  let xlab = ''; for (let i = 0; i <= 6; i++) { const xv = xMin + (xMax - xMin) * i / 6; xlab += `<text class="lbl" x="${sx(xv)}" y="${H - 8}" text-anchor="middle">${Math.round(xv)}</text>`; }
+  const band = (S2, color) => { if (!S2) return ''; const top = xs.map((x, i) => `${i ? 'L' : 'M'}${sx(x).toFixed(1)} ${sy(S2.p90[i]).toFixed(1)}`).join(' ');
+    const bot = xs.map((x, i) => `L${sx(x).toFixed(1)} ${sy(S2.p10[i]).toFixed(1)}`).reverse().join(' ');
+    return `<path d="${top} ${bot} Z" fill="${color}" opacity=".13"/><path class="line" d="${xs.map((x, i) => `${i ? 'L' : 'M'}${sx(x).toFixed(1)} ${sy(S2.p50[i]).toFixed(1)}`).join(' ')}" stroke="${color}"/>`; };
+  let mk = ''; (opts.markers || []).forEach(m => { const mx = sx(m.x); mk += `<line class="marker-line" x1="${mx}" y1="${pad.t}" x2="${mx}" y2="${H - pad.b}"/><text class="lbl-strong" x="${mx}" y="${pad.t + 9}" text-anchor="middle">${escapeHtml(m.label)}</text>`; });
+  return `<svg class="chart" viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">${grid}${mk}${band(A, 'var(--ink)')}${band(B, 'var(--gold-deep)')}<line class="axis" x1="${pad.l}" y1="${H - pad.b}" x2="${W - pad.r}" y2="${H - pad.b}"/>${ylab}${xlab}</svg>`;
+}
+function plAllocBar(stats) {
+  if (!stats) return '';
+  const order = Object.keys(ASSET_CLASSES);
+  const colors = { usL: 'var(--gold)', usS: '#d9a84a', intl: '#7c8aa0', em: '#b08968', bond: 'var(--ink)', tsy: '#33425a', hy: '#8a6d3b', reit: '#4ba585', gold: '#c9a227', cmd: '#a67c52', cash: '#9fb0c2', bal: '#6b7f99', crypto: '#8757b2', custom: '#94a3b4' };
+  const segs = order.filter(k => stats.byClass[k] > 0.001).map(k => `<i style="width:${(stats.byClass[k] * 100).toFixed(1)}%;background:${colors[k]}" title="${escapeAttr(ASSET_CLASSES[k].label)}"></i>`).join('');
+  const leg = order.filter(k => stats.byClass[k] > 0.001).map(k => `<span><i class="dot" style="background:${colors[k]}"></i>${ASSET_CLASSES[k].label} ${pct(stats.byClass[k] * 100, 0)}</span>`).join('');
+  return `<div class="compbar" style="height:12px">${segs}</div><div class="comp-legend">${leg}</div>`;
+}
+function livePortfolioLab() {
+  const el = $('#res-portfolio'); if (!el) return;
+  const st = STATE.portfolios.settings, planMode = (st.mode || 'plan') === 'plan';
+  const res = plAsync(() => { if (currentView === 'portfolio') livePortfolioLab(); });
+  const curStats = portfolioStats(STATE.portfolios.current.holdings);
+  const proStats = portfolioStats(STATE.portfolios.proposed.holdings);
+  if (!curStats && !proStats) { el.innerHTML = panel('Results', '<div class="empty">Add holdings with weights to either portfolio to run the analysis.</div>'); return; }
+  if (!res) {
+    el.innerHTML = panel('Results', `<div class="empty"><div class="e-ico">◷</div>Running ${planMode ? (+st.trials || 800) + ' full-plan simulations' : '1,500 growth simulations'} per portfolio…</div>`);
+    return;
+  }
+  const A = res.current, B = res.proposed;
+  const card = (label, r, colorVar) => {
+    if (!r) return `<div class="panel pad"><div class="empty">No ${label.toLowerCase()} holdings yet.</div></div>`;
+    const s = r.stats;
+    const head = `<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem"><span class="dot" style="background:${colorVar};width:11px;height:11px"></span><b style="font-size:1.02rem">${escapeHtml(label)}</b></div>`;
+    if (planMode) {
+      const pctV = Math.round(r.mc.success * 100), t3 = pctV >= 80 ? 'good' : pctV >= 60 ? 'warn' : 'bad';
+      return `<div class="panel pad" style="text-align:center">${head}${gauge(pctV, { size: 170 })}
+        <div>${badge(pctV >= 80 ? 'Strong' : pctV >= 60 ? 'On track' : 'At risk', t3)}</div>
+        <div class="tl-rows" style="text-align:left">
+          <div class="tl-row"><span>Expected return / risk</span><b>${pct(s.mean * 100, 1)} / ±${pct(s.vol * 100, 1)}</b></div>
+          <div class="tl-row"><span>Median ending estate</span><b class="amount">${fmtK(r.mc.endP50)}</b></div>
+          <div class="tl-row"><span>Bad markets (10th pct.)</span><b class="amount">${r.mc.endP10 > 0 ? fmtK(r.mc.endP10) : 'lasts to ' + (r.mc.deplP10 > r.mc.lastAge ? r.mc.lastAge + '+' : r.mc.deplP10)}</b></div>
+        </div>
+        <div style="margin-top:.6rem">${plAllocBar(s)}</div></div>`;
+    }
+    return `<div class="panel pad">${head}
+      <div class="tl-rows">
+        <div class="tl-row"><span>Expected return / risk</span><b>${pct(s.mean * 100, 1)} / ±${pct(s.vol * 100, 1)}</b></div>
+        <div class="tl-row"><span>Median outcome</span><b class="amount">${fmtK(r.g.endP50)}</b></div>
+        <div class="tl-row"><span>Range (10th–90th)</span><b class="amount">${fmtK(r.g.endP10)} – ${fmtK(r.g.endP90)}</b></div>
+        <div class="tl-row"><span>Chance of ending below invested</span><b>${pct(r.g.lossProb * 100, 0)}</b></div>
+      </div>
+      <div style="margin-top:.6rem">${plAllocBar(s)}</div></div>`;
+  };
+  const xs = planMode ? (A ? A.mc.ages : B.mc.ages) : Array.from({ length: (+st.years || 30) + 1 }, (_, i) => i);
+  const chA = A ? (planMode ? A.mc : A.g) : null, chB = B ? (planMode ? B.mc : B.g) : null;
+  const cmp = (label, a, b, fmt, higherBetter = true) => (a == null || b == null) ? '' : cmpRow(label, a, b, fmt, higherBetter);
+  const table = (A && B) ? `<table class="tbl" style="margin-top:1rem"><thead><tr><th style="text-align:left">Metric</th><th>${escapeHtml(STATE.portfolios.current.name || 'Current')}</th><th>${escapeHtml(STATE.portfolios.proposed.name || 'Proposed')}</th><th>Change</th></tr></thead><tbody>
+      ${planMode ? cmp('Probability of success', Math.round(A.mc.success * 100), Math.round(B.mc.success * 100), v => v + '%') : ''}
+      ${planMode ? cmp('Median ending estate', A.mc.endP50, B.mc.endP50, fmt$) : cmp('Median outcome', A.g.endP50, B.g.endP50, fmt$)}
+      ${planMode ? cmp('Bad-market ending (10th)', A.mc.endP10, B.mc.endP10, fmt$) : cmp('10th percentile', A.g.endP10, B.g.endP10, fmt$)}
+      ${cmp('Expected return', +(A.stats.mean * 100).toFixed(1), +(B.stats.mean * 100).toFixed(1), v => pct(v, 1))}
+      ${cmp('Volatility (risk)', +(A.stats.vol * 100).toFixed(1), +(B.stats.vol * 100).toFixed(1), v => '±' + pct(v, 1), false)}
+    </tbody></table>` : '';
+  el.innerHTML = `
+    <div class="grid cols-2" style="margin-bottom:1.1rem;align-items:stretch">${card(STATE.portfolios.current.name || 'Current', A, 'var(--ink)')}${card(STATE.portfolios.proposed.name || 'Proposed', B, 'var(--gold-deep)')}</div>
+    ${panel(planMode ? 'Plan Outcomes Under Each Portfolio' : 'Growth of the Money', plCompareChart(xs, chA, chB, { markers: planMode && !RESULTS.alreadyRetired ? [{ x: RESULTS.retAge, label: 'Retire' }] : [] }) +
+      `<div class="legend"><span><i class="dot" style="background:var(--ink)"></i>${escapeHtml(STATE.portfolios.current.name || 'Current')}</span><span><i class="dot" style="background:var(--gold-deep)"></i>${escapeHtml(STATE.portfolios.proposed.name || 'Proposed')}</span><span>Bands: 10th–90th percentile · lines: median</span></div>` + table,
+      { sub: planMode ? `${+st.trials || 800} trials each` : `1,500 trials each`, hideKey: 'pl-results' })}
+    <div class="btn-row advisor-only" style="margin-top:1rem">
+      ${A ? `<button class="btn" data-action="pl-apply" data-pf="current">Use Current in plan assumptions</button>` : ''}
+      ${B ? `<button class="btn gold" data-action="pl-apply" data-pf="proposed">Use Proposed in plan assumptions</button>` : ''}
+    </div>
+    <p class="rp-disclaimer" style="margin-top:.8rem">Ticker figures are long-run capital-market planning assumptions by asset class (editable above) — not live market data, past performance, or a guarantee. Single securities carry the asset class’s expected return with concentrated risk. “Through the plan” runs the client’s actual cash flows — spending, guaranteed income, taxes, and RMDs — under randomized returns.</p>`;
+}
+
+const builders = { intake: buildIntake, profile: buildProfile, needs: buildNeeds, cashflow: buildCashflow, decision: buildDecision, tax: buildTax, portfolio: buildPortfolioLab };
+const liveFns = { intake: liveIntake, dashboard: renderDashboard, profile: liveProfile, needs: liveNeeds, cashflow: liveCashflow, foundational: renderFoundational, decision: liveDecision, tax: liveTax, portfolio: livePortfolioLab, coplanner: renderCoplanner };
 function showView(v) {
   if (presentMode) return showPresentView(v);
   currentView = v; document.body.dataset.view = v;
@@ -2536,7 +2828,7 @@ function recompute() {
 }
 
 /* ----------------------------- presentation ------------------------------- */
-const PRESENT_VIEWS = [['dashboard', 'Overview'], ['foundational', 'The Plan'], ['needs', 'Needs'], ['cashflow', 'Goals & Cash Flow'], ['tax', 'Taxes'], ['decision', 'What-Ifs'], ['coplanner', 'Insights']];
+const PRESENT_VIEWS = [['dashboard', 'Overview'], ['foundational', 'The Plan'], ['needs', 'Needs'], ['cashflow', 'Goals & Cash Flow'], ['portfolio', 'Portfolios'], ['tax', 'Taxes'], ['decision', 'What-Ifs'], ['coplanner', 'Insights']];
 function clientNames() {
   const c = STATE.household.client.name || '', s = STATE.household.spouse.name || '';
   if (STATE.household.spouse.included && s) return `${c || 'Client'} & ${s}`;
@@ -2579,7 +2871,7 @@ const closeSafe = () => { $('#safeScreen').hidden = true; };
 function openReport() { $('#reportControls').innerHTML = reportControlsHTML(); $('#reportModal').hidden = false; }
 function closeReport() { $('#reportModal').hidden = true; }
 function reportControlsHTML() {
-  const secs = [['summary', 'Plan summary & net worth'], ['retirement', 'Retirement outlook'], ['cashflow', 'Cash-flow projection'], ['tax', 'Tax planning'], ['goals', 'Goals funding'], ['needs', 'Needs analysis'], ['insights', 'CoPlanner insights'], ['disclosures', 'Important disclosures']];
+  const secs = [['summary', 'Plan summary & net worth'], ['retirement', 'Retirement outlook'], ['cashflow', 'Cash-flow projection'], ['portfolio', 'Portfolio comparison'], ['tax', 'Tax planning'], ['goals', 'Goals funding'], ['needs', 'Needs analysis'], ['insights', 'CoPlanner insights'], ['disclosures', 'Important disclosures']];
   return `<div class="rep-opt"><input type="radio" name="repcopy" value="client" id="rc-client" checked>
       <div class="ro-text"><strong>Client copy</strong><span>Polished deliverable — excludes private advisor notes.</span></div></div>
     <div class="rep-opt"><input type="radio" name="repcopy" value="advisor" id="rc-advisor">
@@ -2653,6 +2945,26 @@ function buildReport(opts) {
   if (opts.needs) pages.push(`<div class="report-page">${rpHead('Needs Analysis')}
     <div class="rp-grid two">${rpStat('Education — Total Cost', fmt$(R.eduFuture))}${rpStat('Education — Projected', fmt$(R.eduProjected), R.eduGap > 0 ? 'Gap ' + fmt$(R.eduGap) : 'On track')}</div>
     <div class="rp-grid two">${rpStat('Protection — Total Need', fmt$(R.totalProtNeed))}${rpStat('Protection — Gap', R.protGap > 0 ? fmt$(R.protGap) : 'Covered')}</div>${rpFoot}</div>`);
+  if (opts.portfolio) {
+    const P = STATE.portfolios, res = plRunNow();                     // cached when the Lab was just open
+    const planMode = (P.settings.mode || 'plan') === 'plan';
+    const one = (label, r) => {
+      if (!r) return '';
+      const s = r.stats, cls = Object.keys(s.byClass).map(k => `${ASSET_CLASSES[k].label} ${pct(s.byClass[k] * 100, 0)}`).join(' · ');
+      const line = planMode
+        ? `Probability of success <b>${Math.round(r.mc.success * 100)}%</b> · median ending estate <b>${fmtK(r.mc.endP50)}</b> · bad markets (10th pct.) ${r.mc.endP10 > 0 ? fmtK(r.mc.endP10) : 'funds to age ' + (r.mc.deplP10 > r.mc.lastAge ? r.mc.lastAge + '+' : r.mc.deplP10)}`
+        : `Median outcome <b>${fmtK(r.g.endP50)}</b> · range ${fmtK(r.g.endP10)}–${fmtK(r.g.endP90)} · ${pct(r.g.lossProb * 100, 0)} chance below invested`;
+      return `<div class="rp-insight"><h4>${escapeHtml(label)} — expected ${pct(s.mean * 100, 1)} / ±${pct(s.vol * 100, 1)}</h4>
+        <div>${(s.holdings || []).map(h => `${h.ticker} ${pct(h.w * 100, 0)}`).join(' · ')}</div>
+        <div style="margin-top:2pt;color:#555">${cls}</div>
+        <div class="rpi-act" style="margin-top:3pt">${line}</div></div>`;
+    };
+    if (res.current || res.proposed) pages.push(`<div class="report-page">${rpHead('Portfolio Comparison')}
+      <p class="rp-note">${planMode ? `Each portfolio was tested through the full financial plan — spending, guaranteed income, taxes, and required distributions — across ${+P.settings.trials || 800} randomized market simulations.` : `Each portfolio compounds a starting amount across 1,500 randomized simulations (no plan cash flows).`}</p>
+      ${one(P.current.name || 'Current portfolio', res.current)}
+      ${one(P.proposed.name || 'Proposed portfolio', res.proposed)}
+      <p class="rp-disclaimer">Ticker figures are long-run capital-market planning assumptions by asset class — not live market data, past performance, or a guarantee. Single securities carry the asset class’s expected return with concentrated risk.</p>${rpFoot}</div>`);
+  }
   if (opts.insights) pages.push(`<div class="report-page">${rpHead('CoPlanner Insights & Actions')}
     ${buildInsights(R).map(i => `<div class="rp-insight"><h4>${escapeHtml(i.title)}</h4><div>${i.detail}</div>${i.action ? `<div class="rpi-act">→ ${i.action}</div>` : ''}</div>`).join('')}${rpFoot}</div>`);
   if (opts.advisor && (STATE.advisorNotes || '').trim()) pages.push(`<div class="report-page">${rpHead('Advisor Notes — Confidential')}
@@ -2672,6 +2984,7 @@ function doPrint() {
 
 /* ----------------------------- list rebuilds ------------------------------ */
 const rebuildAssets = () => $$('#assetsList').forEach(c => c.innerHTML = (STATE.assets || []).map(assetRow).join(''));
+const rebuildPlList = pf => $$(`#plList-${pf}`).forEach(c => c.innerHTML = (STATE.portfolios[pf].holdings || []).map((h, i) => plHoldingRow(pf, h, i)).join(''));
 const rebuildLiabs  = () => $$('#liabList').forEach(c => c.innerHTML = (STATE.liabilities || []).map(liabRow).join(''));
 const rebuildGoals  = () => $$('#goalsList').forEach(c => c.innerHTML = (STATE.goals || []).map(goalRow).join(''));
 const rebuildEvents = () => $$('#eventsList').forEach(c => c.innerHTML = (STATE.events || []).map(eventRow).join(''));
@@ -2718,6 +3031,23 @@ function handleAction(action, el) {
       if (m === 'percent' && (+SV.savingsRatePct || 0) === 0 && (+SV.annualSavings || 0) > 0 && gi > 0) SV.savingsRatePct = +((+SV.annualSavings) / gi * 100).toFixed(1);
       if (m === 'dollar' && (+SV.annualSavings || 0) === 0 && (+SV.savingsRatePct || 0) > 0 && gi > 0) SV.annualSavings = Math.round((+SV.savingsRatePct) / 100 * gi);
       SV.mode = m; built[currentView] = false; RESULTS = compute(STATE); showView(currentView); scheduleSave(); break;
+    }
+    case 'pl-add': { const pf = el.dataset.pf; STATE.portfolios[pf].holdings.push({ id: uid(), ticker: '', weight: 0 }); rebuildPlList(pf); scheduleSave(); break; }
+    case 'pl-del': { const pf = el.dataset.pf; STATE.portfolios[pf].holdings.splice(+el.dataset.idx, 1); built.portfolio = false; showView('portfolio'); scheduleSave(); break; }
+    case 'pl-normalize': {                                             // scale weights so they total exactly 100
+      const pf = el.dataset.pf, hs = STATE.portfolios[pf].holdings.filter(h => (+h.weight || 0) > 0);
+      const tot = hs.reduce((s, h) => s + (+h.weight || 0), 0);
+      if (tot > 0) hs.forEach(h => h.weight = +((+h.weight) / tot * 100).toFixed(1));
+      built.portfolio = false; showView('portfolio'); scheduleSave(); break;
+    }
+    case 'pl-mode': STATE.portfolios.settings.mode = el.dataset.mode === 'growth' ? 'growth' : 'plan'; built.portfolio = false; showView('portfolio'); scheduleSave(); break;
+    case 'pl-apply': {                                                 // adopt this portfolio's return & risk as the plan's assumptions
+      const pf = el.dataset.pf, stats = portfolioStats(STATE.portfolios[pf].holdings); if (!stats) break;
+      const A = STATE.assumptions;
+      A.preReturn = +(stats.mean * 100).toFixed(1); A.postReturn = +(stats.mean * 100).toFixed(1);
+      A.volatilityPre = +(stats.vol * 100).toFixed(1); A.volatilityPost = +(stats.vol * 100).toFixed(1);
+      recompute(); toast(`Plan assumptions set to <b>${escapeHtml(STATE.portfolios[pf].name || pf)}</b> — ${pct(stats.mean * 100, 1)} return · ±${pct(stats.vol * 100, 1)} risk`);
+      break;
     }
     case 'acct-contrib-mode': {                                        // per-account: contribute $/mo vs % of salary
       const a = (STATE.assets || [])[+el.dataset.idx]; if (!a) break;
@@ -2782,6 +3112,20 @@ function onInput(e) {
     recompute();
     if (arr === 'goals' && key === 'type') rebuildGoals();
     if (arr === 'events' && key === 'type') rebuildEvents();
+    return;
+  }
+  if (t.matches('[data-pf]')) {                                       // Portfolio Lab holding fields
+    const pf = t.getAttribute('data-pf'), i = +t.getAttribute('data-hidx'), key = t.getAttribute('data-hkey');
+    const h = ((STATE.portfolios[pf] || {}).holdings || [])[i]; if (!h) return;
+    h[key] = readVal(t);
+    if (key === 'ticker') {
+      h.ticker = String(h.ticker || '').toUpperCase(); t.value = h.ticker;
+      delete h.cls; delete h.ret; delete h.vol; delete h.name;        // fresh ticker → fresh library lookup
+      const r = resolveHolding(h);
+      $$(`[data-pl-name="${pf}-${i}"]`).forEach(el => el.textContent = r.known ? r.name : (r.ticker ? 'Unknown ticker — pick an asset class' : 'Type a ticker (SPY, VTI, AAPL…)'));
+    }
+    if (currentView === 'portfolio') livePortfolioLab();
+    scheduleSave();
     return;
   }
   if (t.matches('[data-scn]')) {
@@ -2855,7 +3199,11 @@ function onKey(e) {
 function wireEvents() {
   document.addEventListener('input', onInput);
   document.addEventListener('change', e => { if (e.target.matches('select')) onInput(e); });
-  document.addEventListener('focusout', e => { const t = e.target; if (t && t.hasAttribute && t.hasAttribute('data-money')) t.value = moneyDisplay(parseMoney(t.value)); });
+  document.addEventListener('focusout', e => {
+    const t = e.target; if (!t || !t.hasAttribute) return;
+    if (t.hasAttribute('data-money')) t.value = moneyDisplay(parseMoney(t.value));
+    if (t.matches('[data-pf][data-hkey="ticker"]')) rebuildPlList(t.getAttribute('data-pf'));   // refresh class/return/vol placeholders after a ticker lookup
+  });
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey);
   $('#planMenuBtn').addEventListener('click', () => $('#planMenu').hidden ? openPlanMenu() : closePlanMenu());
