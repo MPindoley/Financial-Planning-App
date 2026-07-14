@@ -129,8 +129,8 @@ function defaultState() {
     estate: { legacyTarget: 0, annualGifting: 0, charitableGoal: 0, hasWill: false, hasTrust: false, hasPOA: false, hasHealthDirective: false, beneficiariesConfirmed: false, estateNote: '' },
     portfolios: {
       settings: { mode: 'plan', trials: 800, years: 30, start: 0, annual: 0, wdType: 'pct', wdPct: 4, wdAmount: 0, inflateWd: true },
-      current:  { name: 'Current portfolio',  holdings: [{ id: uid(), ticker: 'SPY', weight: 60 }, { id: uid(), ticker: 'AGG', weight: 40 }] },
-      proposed: { name: 'Proposed portfolio', holdings: [{ id: uid(), ticker: 'VTI', weight: 40 }, { id: uid(), ticker: 'VXUS', weight: 15 }, { id: uid(), ticker: 'BND', weight: 35 }, { id: uid(), ticker: 'SCHD', weight: 10 }] }
+      current:  { name: 'Current portfolio',  entryMode: 'pct', holdings: [{ id: uid(), ticker: 'SPY', weight: 60 }, { id: uid(), ticker: 'AGG', weight: 40 }] },
+      proposed: { name: 'Proposed portfolio', entryMode: 'pct', holdings: [{ id: uid(), ticker: 'VTI', weight: 40 }, { id: uid(), ticker: 'VXUS', weight: 15 }, { id: uid(), ticker: 'BND', weight: 35 }, { id: uid(), ticker: 'SCHD', weight: 10 }] }
     },
     ui: { collapsed: false }
   };
@@ -673,11 +673,11 @@ function mcAsync(onReady) {
 const ASSET_CLASSES = {
   usL:   { label: 'US Large Cap',        ret: 7.2, vol: 15.5 },
   usS:   { label: 'US Small / Mid',      ret: 7.7, vol: 19.5 },
-  intl:  { label: 'Intl Developed',      ret: 7.0, vol: 16.5 },
+  intl:  { label: 'Intl Developed',      ret: 7.5, vol: 16.5 },
   em:    { label: 'Emerging Markets',    ret: 7.8, vol: 21.0 },
   bond:  { label: 'Core Bonds',          ret: 4.6, vol: 5.5 },
   tsy:   { label: 'Treasuries / TIPS',   ret: 4.2, vol: 6.0 },
-  hy:    { label: 'High Yield / Credit', ret: 5.8, vol: 9.0 },
+  hy:    { label: 'High Yield / Credit', ret: 6.3, vol: 9.0 },
   reit:  { label: 'Real Estate (REIT)',  ret: 6.8, vol: 18.5 },
   gold:  { label: 'Gold / Metals',       ret: 4.5, vol: 15.5 },
   cmd:   { label: 'Commodities',         ret: 4.8, vol: 16.0 },
@@ -1947,8 +1947,8 @@ function plRunNow() {
   const sig = plSignature();
   if (PL_CACHE.has(sig)) return PL_CACHE.get(sig);
   const P = STATE.portfolios, st = P.settings || {};
-  const run = pf => {
-    const stats = portfolioStats((pf || {}).holdings);
+  const run = key => {
+    const stats = portfolioStats(plHoldings(key));           // $ amounts resolve to effective weights
     if (!stats) return null;
     const res = { stats };
     const mode = st.mode || 'plan';
@@ -1964,7 +1964,7 @@ function plRunNow() {
     else res.g = growthMC(+st.start || RESULTS.investable || 100000, +st.years || 30, +st.annual || 0, stats.mean, stats.vol, 1500);
     return res;
   };
-  const out = { current: run(P.current), proposed: run(P.proposed) };
+  const out = { current: run('current'), proposed: run('proposed') };
   PL_CACHE.set(sig, out);
   if (PL_CACHE.size > 6) PL_CACHE.delete(PL_CACHE.keys().next().value);
   return out;
@@ -3822,47 +3822,75 @@ function liveIntake() {
 }
 /* ----------------------------- PORTFOLIO LAB (UI) ------------------------- */
 let PL_TAB = 'current';                                                 // which holdings editor is open
+/* Holdings with an effective weight, regardless of entry mode — $ amounts become proportional weights. */
+function plHoldings(pf) {
+  const P = STATE.portfolios[pf] || {};
+  if (P.entryMode !== 'dollar') return P.holdings || [];
+  return (P.holdings || []).map(h => ({ ...h, weight: +h.amount || 0 }));   // portfolioStats normalizes by the total
+}
+const plDollarTotal = pf => ((STATE.portfolios[pf] || {}).holdings || []).reduce((s, h) => s + (+h.amount || 0), 0);
 function plHoldingRow(pf, h, i) {
   const r = resolveHolding(h);
+  const dollar = (STATE.portfolios[pf] || {}).entryMode === 'dollar';
   const clsOpts = Object.keys(ASSET_CLASSES).map(k => `<option value="${k}" ${(h.cls || r.cls) === k ? 'selected' : ''}>${ASSET_CLASSES[k].label}</option>`).join('');
   const nameTxt = r.known ? r.name : (r.ticker ? 'Unknown — pick a class' : '');
+  const tot = dollar ? plDollarTotal(pf) : 0;
+  const sizeCell = dollar
+    ? `<div><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-pf="${pf}" data-hidx="${i}" data-hkey="amount" data-money value="${moneyDisplay(h.amount || '')}" placeholder="0"></div>
+       <div class="pl-wpct" data-plw="${pf}-${i}">${tot > 0 ? pct((+h.amount || 0) / tot * 100, 1) : '&nbsp;'}</div></div>`
+    : `<div class="control has-suffix"><input type="number" step="0.1" min="0" max="100" data-pf="${pf}" data-hidx="${i}" data-hkey="weight" data-vtype="percent" value="${h.weight != null && h.weight !== '' ? h.weight : ''}" placeholder="0"><span class="suffix">%</span></div>`;
   return `<div class="pl-row">
     <input type="text" style="text-transform:uppercase" list="tickerList" data-pf="${pf}" data-hidx="${i}" data-hkey="ticker" value="${escapeAttr(h.ticker || '')}" placeholder="Ticker" autocomplete="off">
     <div class="pl-name" data-pl-name="${pf}-${i}">${escapeHtml(nameTxt)}</div>
     <select data-pf="${pf}" data-hidx="${i}" data-hkey="cls" data-vtype="text">${clsOpts}</select>
-    <div class="control has-suffix"><input type="number" step="0.1" min="0" max="100" data-pf="${pf}" data-hidx="${i}" data-hkey="weight" data-vtype="percent" value="${h.weight != null && h.weight !== '' ? h.weight : ''}" placeholder="0"><span class="suffix">%</span></div>
+    ${sizeCell}
     <div class="control has-suffix"><input type="number" step="0.1" data-pf="${pf}" data-hidx="${i}" data-hkey="ret" data-vtype="percent" value="${h.ret != null && h.ret !== '' ? h.ret : ''}" placeholder="${r.ret}"><span class="suffix">%</span></div>
     <div class="control has-suffix"><input type="number" step="0.5" min="0" data-pf="${pf}" data-hidx="${i}" data-hkey="vol" data-vtype="percent" value="${h.vol != null && h.vol !== '' ? h.vol : ''}" placeholder="${r.vol}"><span class="suffix">%</span></div>
     <button class="rr-del" data-action="pl-del" data-pf="${pf}" data-idx="${i}" title="Remove">×</button>
   </div>`;
 }
+/* Live-refresh the derived % under each $ amount (and the header total) without rebuilding the rows. */
+function plRefreshWeights(pf) {
+  const P = STATE.portfolios[pf]; if (!P) return;
+  if (P.entryMode === 'dollar') {
+    const tot = plDollarTotal(pf);
+    (P.holdings || []).forEach((h, i) => $$(`[data-plw="${pf}-${i}"]`).forEach(el => el.innerHTML = tot > 0 ? pct((+h.amount || 0) / tot * 100, 1) : '&nbsp;'));
+    $$(`[data-pl-total="${pf}"]`).forEach(el => el.innerHTML = 'Total ' + badge(fmt$(tot), tot > 0 ? 'good' : 'warn'));
+  } else {
+    const totW = (P.holdings || []).reduce((s, h) => s + (+h.weight || 0), 0);
+    $$(`[data-pl-total="${pf}"]`).forEach(el => el.innerHTML = 'Total ' + (Math.abs(totW - 100) < 0.05 ? badge(totW.toFixed(0) + '%', 'good') : badge(totW.toFixed(1) + '%', 'warn')));
+  }
+}
 function plEditor(pf) {
-  const P = STATE.portfolios[pf];
-  const totW = (P.holdings || []).reduce((s, h) => s + (+h.weight || 0), 0);
-  const stats = portfolioStats(P.holdings);
-  const totBadge = Math.abs(totW - 100) < 0.05 ? badge(totW.toFixed(0) + '%', 'good') : badge(totW.toFixed(1) + '%', 'warn');
+  const P = STATE.portfolios[pf], dollar = P.entryMode === 'dollar';
+  const stats = portfolioStats(plHoldings(pf));
+  let totBadge;
+  if (dollar) { const tot = plDollarTotal(pf); totBadge = badge(fmt$(tot), tot > 0 ? 'good' : 'warn'); }
+  else { const totW = (P.holdings || []).reduce((s, h) => s + (+h.weight || 0), 0); totBadge = Math.abs(totW - 100) < 0.05 ? badge(totW.toFixed(0) + '%', 'good') : badge(totW.toFixed(1) + '%', 'warn'); }
+  const segBtn = (v, l) => `<button type="button" class="seg-btn ${(dollar ? 'dollar' : 'pct') === v ? 'on' : ''}" data-action="pl-entry" data-pf="${pf}" data-mode="${v}">${l}</button>`;
   return `<div class="panel">
     <div class="panel-head" style="flex-wrap:wrap;gap:.7rem">
       <div style="display:flex;align-items:center;gap:.7rem;flex:1;min-width:260px">
         <h3 style="white-space:nowrap">${pf === 'current' ? 'Current Holdings' : 'Proposed Holdings'}</h3>
-        <input type="text" data-path="portfolios.${pf}.name" data-vtype="text" value="${escapeAttr(P.name || '')}" style="max-width:260px" title="Label on charts & report">
+        <input type="text" data-path="portfolios.${pf}.name" data-vtype="text" value="${escapeAttr(P.name || '')}" style="max-width:240px" title="Label on charts & report">
       </div>
       <div class="btn-row" style="align-items:center">
-        <span style="font-size:.74rem;color:var(--muted)">Total ${totBadge}</span>
-        <button class="btn sm" data-action="pl-normalize" data-pf="${pf}">Normalize to 100%</button>
+        <span class="seg mode-seg" role="group" title="How the statement gives you the holdings">${segBtn('pct', '% weights')}${segBtn('dollar', '$ amounts')}</span>
+        <span style="font-size:.74rem;color:var(--muted)" data-pl-total="${pf}">Total ${totBadge}</span>
+        ${dollar ? '' : `<button class="btn sm" data-action="pl-normalize" data-pf="${pf}">Normalize to 100%</button>`}
         <button class="btn sm" data-action="pl-paste-toggle" data-pf="${pf}">📋 Paste from statement</button>
       </div>
     </div>
     <div class="panel-body" style="padding-top: .9rem">
       <div class="pl-paste" id="plPaste-${pf}" hidden>
-        <textarea id="plPasteText-${pf}" rows="6" placeholder="Paste holdings straight from a statement or proposal — one per line, e.g.&#10;SPDR MSCI USA StrategicFactors ETF (QUS)   12.40%&#10;Vanguard Total World Bond ETF (BNDW)   9.00&#10;AAPL 5"></textarea>
+        <textarea id="plPasteText-${pf}" rows="6" placeholder="Paste holdings straight from a statement or proposal — one per line. Percents or dollars both work:&#10;SPDR MSCI USA StrategicFactors ETF (QUS)   12.40%&#10;Vanguard Total World Bond ETF (BNDW)   9.00&#10;Apple Inc (AAPL)   $45,230.12"></textarea>
         <div class="btn-row" style="margin-top:.5rem">
           <button class="btn gold sm" data-action="pl-paste-import" data-pf="${pf}">Import — replaces this list</button>
           <button class="btn ghost sm" data-action="pl-paste-toggle" data-pf="${pf}">Cancel</button>
-          <span style="font-size:.72rem;color:var(--muted);align-self:center">Reads the (TICKER) and the trailing % on each line.</span>
+          <span style="font-size:.72rem;color:var(--muted);align-self:center">Reads the (TICKER) and the trailing number — % or $ detected automatically.</span>
         </div>
       </div>
-      <div class="pl-colhead"><span>Ticker</span><span>Fund / security</span><span>Asset class</span><span>Weight</span><span>Exp. ret</span><span>Volatility</span><span></span></div>
+      <div class="pl-colhead"><span>Ticker</span><span>Fund / security</span><span>Asset class</span><span>${dollar ? 'Amount' : 'Weight'}</span><span>Exp. ret</span><span>Volatility</span><span></span></div>
       <div id="plList-${pf}">${(P.holdings || []).map((h, i) => plHoldingRow(pf, h, i)).join('')}</div>
       <div class="btn-row" style="align-items:center;margin-top:.4rem">
         <button class="add-row" data-action="pl-add" data-pf="${pf}">＋ Add holding</button>
@@ -3876,9 +3904,10 @@ function ensureTickerDatalist() {                                       // one s
   dl.innerHTML = Object.keys(TICKERS).map(k => `<option value="${escapeAttr(k)}" label="${escapeAttr(TICKERS[k][1])}"></option>`).join('');
   document.body.appendChild(dl);
 }
-/* Parse "Fund Name (TICKER)  12.40%" statement lines — also accepts "TICKER 12.4". */
+/* Parse statement lines like "Fund Name (TICKER)  12.40%" or "Apple (AAPL)  $45,230.12".
+   Detects whether the numbers are percentages or dollars (majority vote) and returns {holdings, dollar}. */
 function plParsePaste(text) {
-  const out = [];
+  const rows = []; let dollarHits = 0, pctHits = 0;
   String(text || '').split(/\r?\n+/).forEach(line => {
     line = line.trim(); if (!line) return;
     let tk = null;
@@ -3886,10 +3915,17 @@ function plParsePaste(text) {
     if (par) tk = par[1];
     if (!tk) { const first = line.split(/[\s,\t]+/)[0]; if (/^[A-Za-z][A-Za-z0-9.\-]{0,6}$/.test(first)) tk = first; }
     if (!tk) return;
-    const tail = line.replace(/\([^)]*\)/g, '').match(/(\d+(?:\.\d+)?)\s*%?\s*$/);
-    out.push({ id: uid(), ticker: tk.toUpperCase(), weight: tail ? parseFloat(tail[1]) : 0 });
+    const rest = line.replace(/\([^)]*\)/g, '');                       // ignore anything inside the (TICKER) parens
+    const hasPct = /%/.test(rest);
+    const isDollar = !hasPct && (/\$/.test(rest) || /\d,\d{3}(?:\.\d+)?(?!\d)/.test(rest));   // a $ sign or thousands-grouped number
+    const m = rest.replace(/\$/g, '').match(/(\d[\d,]*(?:\.\d+)?)\s*%?\s*$/);
+    const val = m ? parseFloat(m[1].replace(/,/g, '')) : 0;
+    if (isDollar) dollarHits++; else if (hasPct) pctHits++;
+    rows.push({ tk: tk.toUpperCase(), val, dollarish: isDollar });
   });
-  return out;
+  const dollar = dollarHits > pctHits;                                // whichever the statement mostly uses wins
+  const holdings = rows.map(r => dollar ? { id: uid(), ticker: r.tk, amount: r.val } : { id: uid(), ticker: r.tk, weight: r.val });
+  return { holdings, dollar };
 }
 function buildPortfolioLab() {
   ensureTickerDatalist();
@@ -3966,8 +4002,8 @@ function livePortfolioLab() {
   const el = $('#res-portfolio'); if (!el) return;
   const st = STATE.portfolios.settings, mode = st.mode || 'plan';
   const res = plAsync(() => { if (currentView === 'portfolio') livePortfolioLab(); });
-  const curStats = portfolioStats(STATE.portfolios.current.holdings);
-  const proStats = portfolioStats(STATE.portfolios.proposed.holdings);
+  const curStats = portfolioStats(plHoldings('current'));
+  const proStats = portfolioStats(plHoldings('proposed'));
   if (!curStats && !proStats) { el.innerHTML = panel('Results', '<div class="empty">Add holdings with weights to either portfolio to run the analysis.</div>'); return; }
   if (!res) {
     const runNote = mode === 'plan' ? `${+st.trials || 800} full-plan simulations` : mode === 'withdraw' ? `${+st.trials || 1200} withdrawal simulations + sustainable-draw search` : '1,500 growth simulations';
@@ -4035,6 +4071,15 @@ function livePortfolioLab() {
       ${A ? `<button class="btn" data-action="pl-apply" data-pf="current">Use Current in plan assumptions</button>` : ''}
       ${B ? `<button class="btn gold" data-action="pl-apply" data-pf="proposed">Use Proposed in plan assumptions</button>` : ''}
     </div>
+    <details class="pl-method advisor-only" style="margin-top:1rem">
+      <summary>How these numbers work — methodology</summary>
+      <ul>
+        <li><b>Returns come from asset classes, not each fund’s own history.</b> Every ticker is mapped to an asset class (US Large, Intl Developed, Core Bonds…) and takes that class’s long-run capital-market assumption. The tool deliberately does <b>not</b> extrapolate any single fund’s trailing performance — past returns predict poorly and projecting them forward isn’t compliance-safe.</li>
+        <li><b>A brand-new ETF is fine.</b> Because the assumption is the asset class’s, a fund with six months of history is modeled exactly like a decades-old one in the same class — no minimum track record is required. If a holding carries an unusually high fee, net it out by editing its <i>Exp. ret</i> cell.</li>
+        <li><b>Risk is built from class volatilities and correlations</b>, so a diversified mix shows less risk than the sum of its parts. A single stock keeps its class’s expected return but carries concentrated (idiosyncratic) volatility, and leveraged or inverse funds carry very high volatility so the simulation reflects their decay rather than a headline return.</li>
+        <li><b>“Through the plan” stands in for the plan’s return knobs.</b> In this scenario the portfolio’s own expected return and volatility <b>replace</b> the Client Profile’s pre- and in-retirement return assumptions — so changing those two knobs does not move this gauge. Click <b>Use in plan assumptions</b> to copy the portfolio’s return and risk into the plan itself (it sets both the pre- and in-retirement returns to this one number and clears any conflicting per-account growth rates), so the Dashboard, Foundational, and Tax pages all run on the same portfolio.</li>
+      </ul>
+    </details>
     <p class="rp-disclaimer" style="margin-top:.8rem">Ticker figures are long-run capital-market planning assumptions by asset class (editable above) — not live market data, past performance, or a guarantee. Single securities carry the asset class’s expected return with concentrated risk. “Through the plan” runs the client’s actual cash flows — spending, guaranteed income, taxes, and RMDs — under randomized returns.</p>`;
 }
 
@@ -4304,23 +4349,42 @@ function handleAction(action, el) {
     }
     case 'pl-wdtype': STATE.portfolios.settings.wdType = el.dataset.mode === 'dollar' ? 'dollar' : 'pct'; built.portfolio = false; showView('portfolio'); scheduleSave(); break;
     case 'pl-tab': PL_TAB = el.dataset.pf === 'proposed' ? 'proposed' : 'current'; built.portfolio = false; showView('portfolio'); break;
+    case 'pl-entry': {                                                 // toggle how a portfolio is entered: % weights ⇄ $ amounts
+      const pf = el.dataset.pf, P = STATE.portfolios[pf]; if (!P) break;
+      const to = el.dataset.mode === 'dollar' ? 'dollar' : 'pct', from = P.entryMode === 'dollar' ? 'dollar' : 'pct';
+      if (to === from) break;
+      const hs = P.holdings || [];
+      if (to === 'dollar') {                                          // % → $ : spread a notional total across the current weights
+        const base = +STATE.portfolios.settings.start > 0 ? +STATE.portfolios.settings.start : (RESULTS.investable || 1000000);
+        const totW = hs.reduce((s, h) => s + (+h.weight || 0), 0) || 100;
+        hs.forEach(h => h.amount = Math.round(base * (+h.weight || 0) / totW));
+      } else {                                                        // $ → % : normalize amounts back to weights
+        const tot = hs.reduce((s, h) => s + (+h.amount || 0), 0);
+        if (tot > 0) hs.forEach(h => h.weight = +((+h.amount || 0) / tot * 100).toFixed(2));
+      }
+      P.entryMode = to; built.portfolio = false; showView('portfolio'); scheduleSave(); break;
+    }
     case 'pl-paste-toggle': { const box = $(`#plPaste-${el.dataset.pf}`); if (box) { box.hidden = !box.hidden; if (!box.hidden) { const ta = $(`#plPasteText-${el.dataset.pf}`); if (ta) ta.focus(); } } break; }
     case 'pl-paste-import': {
       const pf = el.dataset.pf, ta = $(`#plPasteText-${pf}`);
       const parsed = plParsePaste(ta ? ta.value : '');
-      if (!parsed.length) { toast('Nothing recognized — one holding per line, ticker in (parentheses) or first'); break; }
-      STATE.portfolios[pf].holdings = parsed;
-      const known = parsed.filter(h => tickerLookup(h.ticker)).length;
+      if (!parsed.holdings.length) { toast('Nothing recognized — one holding per line, ticker in (parentheses) or first'); break; }
+      STATE.portfolios[pf].holdings = parsed.holdings;
+      STATE.portfolios[pf].entryMode = parsed.dollar ? 'dollar' : 'pct';
+      const known = parsed.holdings.filter(h => tickerLookup(h.ticker)).length;
       built.portfolio = false; showView('portfolio'); scheduleSave();
-      toast(`Imported <b>${parsed.length}</b> holdings (${known} recognized${known < parsed.length ? ', ' + (parsed.length - known) + ' need a class' : ''})`);
+      toast(`Imported <b>${parsed.holdings.length}</b> holdings as ${parsed.dollar ? '$ amounts' : '% weights'} (${known} recognized${known < parsed.holdings.length ? ', ' + (parsed.holdings.length - known) + ' need a class' : ''})`);
       break;
     }
     case 'pl-apply': {                                                 // adopt this portfolio's return & risk as the plan's assumptions
-      const pf = el.dataset.pf, stats = portfolioStats(STATE.portfolios[pf].holdings); if (!stats) break;
-      const A = STATE.assumptions;
-      A.preReturn = +(stats.mean * 100).toFixed(1); A.postReturn = +(stats.mean * 100).toFixed(1);
-      A.volatilityPre = +(stats.vol * 100).toFixed(1); A.volatilityPost = +(stats.vol * 100).toFixed(1);
-      recompute(); toast(`Plan assumptions set to <b>${escapeHtml(STATE.portfolios[pf].name || pf)}</b> — ${pct(stats.mean * 100, 1)} return · ±${pct(stats.vol * 100, 1)} risk`);
+      const pf = el.dataset.pf, stats = portfolioStats(plHoldings(pf)); if (!stats) break;
+      const A = STATE.assumptions, r = +(stats.mean * 100).toFixed(1), v = +(stats.vol * 100).toFixed(1);
+      A.preReturn = r; A.postReturn = r;                              // one portfolio return now drives both phases of the plan
+      A.volatilityPre = v; A.volatilityPost = v;
+      let cleared = 0;                                                 // clear per-account growth overrides so none silently overrides the applied return
+      if (STATE.savings && STATE.savings.mode === 'accounts') (STATE.assets || []).forEach(a => { if (a.growth != null && a.growth !== '') { delete a.growth; cleared++; } });
+      recompute();
+      toast(`Plan now runs on <b>${escapeHtml(STATE.portfolios[pf].name || pf)}</b> — ${pct(stats.mean * 100, 1)} return · ±${pct(stats.vol * 100, 1)} risk${cleared ? ` · ${cleared} account growth override${cleared > 1 ? 's' : ''} cleared` : ''}`);
       break;
     }
     case 'acct-contrib-mode': {                                        // per-account: contribute $/mo vs % of salary
@@ -4401,6 +4465,7 @@ function onInput(e) {
       $$(`input[data-pf="${pf}"][data-hidx="${i}"][data-hkey="ret"]`).forEach(el => { el.value = ''; el.placeholder = r.ret; });
       $$(`input[data-pf="${pf}"][data-hidx="${i}"][data-hkey="vol"]`).forEach(el => { el.value = ''; el.placeholder = r.vol; });
     }
+    if (key === 'amount' || key === 'weight') plRefreshWeights(pf);   // live-update the derived % and the running total
     if (currentView === 'portfolio') livePortfolioLab();
     scheduleSave();
     return;

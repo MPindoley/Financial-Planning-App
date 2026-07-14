@@ -440,6 +440,12 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;border-radius:50%;bac
 .pl-row:last-child{border-bottom:none}
 .pl-row input,.pl-row select{padding:.42rem .55rem;font-size:.86rem}
 .pl-name{font-size:.8rem;color:var(--gold-deep);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:1rem}
+.pl-wpct{font-size:.66rem;color:var(--muted);text-align:right;padding:2px .1rem 0 0;line-height:1;min-height:.7rem}
+.pl-method{border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--ivory);padding:.5rem .9rem}
+.pl-method>summary{cursor:pointer;font-size:.78rem;font-weight:700;color:var(--gold-deep);letter-spacing:.02em}
+.pl-method ul{margin:.6rem 0 .3rem;padding-left:1.1rem}
+.pl-method li{font-size:.8rem;color:var(--muted);line-height:1.5;margin-bottom:.5rem}
+.pl-method li b{color:var(--ink)}
 .pl-paste{margin-bottom:.9rem;padding: .8rem;border:1px dashed var(--line-2);border-radius:var(--r-sm);background:var(--ivory)}
 .pl-paste textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem}
 @media(max-width:920px){.pl-colhead{display:none}.pl-row{grid-template-columns:100px 1fr 90px 26px;grid-auto-rows:auto}.pl-row select,.pl-row .control:nth-of-type(2),.pl-row .control:nth-of-type(3){display:none}}
