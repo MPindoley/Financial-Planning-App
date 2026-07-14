@@ -128,7 +128,7 @@ function defaultState() {
     advisorNotes: '',
     estate: { legacyTarget: 0, annualGifting: 0, charitableGoal: 0, hasWill: false, hasTrust: false, hasPOA: false, hasHealthDirective: false, beneficiariesConfirmed: false, estateNote: '' },
     portfolios: {
-      settings: { mode: 'plan', trials: 800, years: 30, start: 0, annual: 0 },
+      settings: { mode: 'plan', trials: 800, years: 30, start: 0, annual: 0, wdType: 'pct', wdPct: 4, wdAmount: 0, inflateWd: true },
       current:  { name: 'Current portfolio',  holdings: [{ id: uid(), ticker: 'SPY', weight: 60 }, { id: uid(), ticker: 'AGG', weight: 40 }] },
       proposed: { name: 'Proposed portfolio', holdings: [{ id: uid(), ticker: 'VTI', weight: 40 }, { id: uid(), ticker: 'VXUS', weight: 15 }, { id: uid(), ticker: 'BND', weight: 35 }, { id: uid(), ticker: 'SCHD', weight: 10 }] }
     },
@@ -702,40 +702,1161 @@ const CLS_CORR = {   // upper triangle; symmetric lookup below (planning-grade c
   crypto: { custom: .30 }
 };
 const clsCorr = (a, b) => a === b ? 1 : (CLS_CORR[a] && CLS_CORR[a][b] != null ? CLS_CORR[a][b] : (CLS_CORR[b] && CLS_CORR[b][a] != null ? CLS_CORR[b][a] : .3));
-/* Ticker → [class, name, volOverride?, retOverride?]. Singles keep the class expected return —
-   idiosyncratic risk isn't rewarded with extra expected return, which is exactly the meeting point. */
+/* Ticker → [class, name, volOverride?, retOverride?] — ~1075 symbols across major ETF families,
+   Vanguard/Fidelity/Schwab/American/T. Rowe/PIMCO/DoubleLine mutual funds, S&P 500 large caps,
+   popular growth names, and ADRs. Long-run planning assumptions, all editable per holding.
+   Singles keep the class expected return — idiosyncratic risk is not rewarded, which is the meeting point. */
 const TICKERS = {
-  /* US broad / large */ SPY: ['usL', 'SPDR S&P 500'], IVV: ['usL', 'iShares Core S&P 500'], VOO: ['usL', 'Vanguard S&P 500'], VTI: ['usL', 'Vanguard Total Market'], ITOT: ['usL', 'iShares Total Market'], SCHB: ['usL', 'Schwab Broad Market'], QQQ: ['usL', 'Invesco Nasdaq-100', 20], QQQM: ['usL', 'Invesco Nasdaq-100', 20], DIA: ['usL', 'SPDR Dow Jones', 14], RSP: ['usL', 'Invesco Equal-Weight S&P', 16],
-  VUG: ['usL', 'Vanguard Growth', 17.5], SCHG: ['usL', 'Schwab Growth', 17.5], IWF: ['usL', 'iShares Growth', 17.5], VTV: ['usL', 'Vanguard Value', 14], SCHV: ['usL', 'Schwab Value', 14], IWD: ['usL', 'iShares Value', 14],
-  /* US small/mid */ IWM: ['usS', 'iShares Russell 2000'], VB: ['usS', 'Vanguard Small-Cap'], SCHA: ['usS', 'Schwab Small-Cap'], VTWO: ['usS', 'Vanguard Russell 2000'], MDY: ['usS', 'SPDR Mid-Cap', 17.5], VO: ['usS', 'Vanguard Mid-Cap', 17], IJH: ['usS', 'iShares Mid-Cap', 17.5],
-  /* International */ VXUS: ['intl', 'Vanguard Total Intl'], VEA: ['intl', 'Vanguard Developed'], EFA: ['intl', 'iShares EAFE'], IEFA: ['intl', 'iShares Core EAFE'], SCHF: ['intl', 'Schwab Intl'], VEU: ['intl', 'Vanguard All-World ex-US'], IXUS: ['intl', 'iShares Total Intl'], VWO: ['em', 'Vanguard Emerging Mkts'], IEMG: ['em', 'iShares Core EM'], EEM: ['em', 'iShares MSCI EM'],
-  /* Bonds */ AGG: ['bond', 'iShares Core US Bond'], BND: ['bond', 'Vanguard Total Bond'], SCHZ: ['bond', 'Schwab US Bond'], BNDX: ['bond', 'Vanguard Intl Bond', 4.5], BSV: ['bond', 'Vanguard Short-Term Bond', 3], BIV: ['bond', 'Vanguard Interm Bond', 6], BLV: ['bond', 'Vanguard Long Bond', 11], MBB: ['bond', 'iShares MBS', 4.5],
-  LQD: ['bond', 'iShares IG Corporate', 8], VCIT: ['bond', 'Vanguard Interm Corp', 6.5], VCSH: ['bond', 'Vanguard Short Corp', 3], MUB: ['bond', 'iShares Muni', 4.5, 3.9], VTEB: ['bond', 'Vanguard Muni', 4.5, 3.9],
-  TLT: ['tsy', 'iShares 20+yr Treasury', 13], VGLT: ['tsy', 'Vanguard Long Treasury', 12], IEF: ['tsy', 'iShares 7-10yr Treasury', 7], VGIT: ['tsy', 'Vanguard Interm Treasury', 5], SHY: ['tsy', 'iShares 1-3yr Treasury', 2], VGSH: ['tsy', 'Vanguard Short Treasury', 2], GOVT: ['tsy', 'iShares US Treasury', 5],
-  TIP: ['tsy', 'iShares TIPS', 6, 4.3], VTIP: ['tsy', 'Vanguard Short TIPS', 2.5, 4.1], SCHP: ['tsy', 'Schwab TIPS', 6, 4.3],
-  HYG: ['hy', 'iShares High Yield'], JNK: ['hy', 'SPDR High Yield'],
-  BIL: ['cash', 'SPDR 1-3mo T-Bill'], SGOV: ['cash', 'iShares 0-3mo Treasury'],
-  /* Dividend / sectors */ SCHD: ['usL', 'Schwab US Dividend', 13.5], VYM: ['usL', 'Vanguard High Dividend', 13.5], VIG: ['usL', 'Vanguard Dividend Growth', 13.5], DVY: ['usL', 'iShares Select Dividend', 14], NOBL: ['usL', 'ProShares Aristocrats', 14], HDV: ['usL', 'iShares Core High Div', 13.5],
-  XLK: ['usL', 'Tech Select SPDR', 21], VGT: ['usL', 'Vanguard Info Tech', 21], SMH: ['usL', 'VanEck Semiconductor', 28], SOXX: ['usL', 'iShares Semiconductor', 28], XLE: ['usL', 'Energy SPDR', 22], XLF: ['usL', 'Financials SPDR', 19], XLV: ['usL', 'Health Care SPDR', 14], XLI: ['usL', 'Industrials SPDR', 16], XLY: ['usL', 'Cons Discretionary SPDR', 18], XLP: ['usL', 'Cons Staples SPDR', 12], XLU: ['usL', 'Utilities SPDR', 13], XLB: ['usL', 'Materials SPDR', 17], XLC: ['usL', 'Comm Services SPDR', 18], XLRE: ['reit', 'Real Estate SPDR'],
-  VNQ: ['reit', 'Vanguard Real Estate'], SCHH: ['reit', 'Schwab US REIT'], IYR: ['reit', 'iShares US Real Estate'],
-  GLD: ['gold', 'SPDR Gold'], IAU: ['gold', 'iShares Gold'], SGOL: ['gold', 'abrdn Gold'], SLV: ['gold', 'iShares Silver', 26], GDX: ['gold', 'VanEck Gold Miners', 32], DBC: ['cmd', 'Invesco Commodity'], PDBC: ['cmd', 'Invesco Optimum Commodity'],
-  IBIT: ['crypto', 'iShares Bitcoin'], FBTC: ['crypto', 'Fidelity Bitcoin'], GBTC: ['crypto', 'Grayscale Bitcoin'], BITO: ['crypto', 'ProShares Bitcoin'],
-  /* Mutual funds */ VFIAX: ['usL', 'Vanguard 500 Index'], FXAIX: ['usL', 'Fidelity 500 Index'], SWPPX: ['usL', 'Schwab S&P 500'], VTSAX: ['usL', 'Vanguard Total Stock'], FSKAX: ['usL', 'Fidelity Total Market'], SWTSX: ['usL', 'Schwab Total Market'], VTIAX: ['intl', 'Vanguard Total Intl'], VBTLX: ['bond', 'Vanguard Total Bond'], FTBFX: ['bond', 'Fidelity Total Bond'],
-  AGTHX: ['usL', 'American Growth Fund', 17], AWSHX: ['usL', 'Washington Mutual', 14.5], ANCFX: ['usL', 'Fundamental Investors', 15.5], AEPGX: ['intl', 'EuroPacific Growth', 17], ABALX: ['bal', 'American Balanced'], AMECX: ['bal', 'Income Fund of America', 9],
-  FCNTX: ['usL', 'Fidelity Contrafund', 17], FMAGX: ['usL', 'Fidelity Magellan', 17], DODGX: ['usL', 'Dodge & Cox Stock', 16], DODIX: ['bond', 'Dodge & Cox Income', 5.5],
-  PIMIX: ['hy', 'PIMCO Income', 7], PONAX: ['hy', 'PIMCO Income A', 7], PTTAX: ['bond', 'PIMCO Total Return', 6],
-  VWENX: ['bal', 'Vanguard Wellington'], VWELX: ['bal', 'Vanguard Wellington Inv'], VWINX: ['bal', 'Vanguard Wellesley', 7], PRGFX: ['usL', 'T. Rowe Growth Stock', 18], TRBCX: ['usL', 'T. Rowe Blue Chip', 18], POAGX: ['usS', 'PRIMECAP Odyssey Aggr', 20],
-  /* Single stocks (class return, single-stock risk) */ AAPL: ['usL', 'Apple', 28], MSFT: ['usL', 'Microsoft', 26], NVDA: ['usL', 'NVIDIA', 45], GOOGL: ['usL', 'Alphabet', 28], GOOG: ['usL', 'Alphabet', 28], AMZN: ['usL', 'Amazon', 30], META: ['usL', 'Meta Platforms', 35], TSLA: ['usL', 'Tesla', 55], 'BRK.B': ['usL', 'Berkshire Hathaway', 20], BRKB: ['usL', 'Berkshire Hathaway', 20],
-  JPM: ['usL', 'JPMorgan', 24], BAC: ['usL', 'Bank of America', 26], WFC: ['usL', 'Wells Fargo', 26], GS: ['usL', 'Goldman Sachs', 27], MS: ['usL', 'Morgan Stanley', 27], C: ['usL', 'Citigroup', 28], V: ['usL', 'Visa', 22], MA: ['usL', 'Mastercard', 22],
-  JNJ: ['usL', 'Johnson & Johnson', 17], PG: ['usL', 'Procter & Gamble', 16], KO: ['usL', 'Coca-Cola', 16], PEP: ['usL', 'PepsiCo', 16], WMT: ['usL', 'Walmart', 18], HD: ['usL', 'Home Depot', 22], COST: ['usL', 'Costco', 20], MCD: ['usL', 'McDonald’s', 18],
-  XOM: ['usL', 'Exxon Mobil', 26], CVX: ['usL', 'Chevron', 25], UNH: ['usL', 'UnitedHealth', 26], LLY: ['usL', 'Eli Lilly', 30], PFE: ['usL', 'Pfizer', 24], MRK: ['usL', 'Merck', 22], ABBV: ['usL', 'AbbVie', 24],
-  AVGO: ['usL', 'Broadcom', 38], AMD: ['usL', 'AMD', 48], INTC: ['usL', 'Intel', 38], ORCL: ['usL', 'Oracle', 28], CRM: ['usL', 'Salesforce', 32], NFLX: ['usL', 'Netflix', 35], DIS: ['usL', 'Disney', 26], BA: ['usL', 'Boeing', 35],
-  T: ['usL', 'AT&T', 20], VZ: ['usL', 'Verizon', 18], MO: ['usL', 'Altria', 20], PM: ['usL', 'Philip Morris', 20], SO: ['usL', 'Southern Co', 15], DUK: ['usL', 'Duke Energy', 15], NEE: ['usL', 'NextEra', 20], O: ['reit', 'Realty Income', 22]
+  SPY: ['usL', 'SPDR S&P 500'],
+  IVV: ['usL', 'iShares Core S&P 500'],
+  VOO: ['usL', 'Vanguard S&P 500'],
+  SPLG: ['usL', 'SPDR Portfolio S&P 500'],
+  VTI: ['usL', 'Vanguard Total Market'],
+  ITOT: ['usL', 'iShares Total Market'],
+  SCHB: ['usL', 'Schwab Broad Market'],
+  SPTM: ['usL', 'SPDR Total Market'],
+  VV: ['usL', 'Vanguard Large-Cap'],
+  SCHX: ['usL', 'Schwab Large-Cap'],
+  MGC: ['usL', 'Vanguard Mega-Cap'],
+  OEF: ['usL', 'iShares S&P 100'],
+  QQQ: ['usL', 'Invesco Nasdaq-100', 20],
+  QQQM: ['usL', 'Invesco Nasdaq-100', 20],
+  ONEQ: ['usL', 'Fidelity Nasdaq Composite', 18],
+  DIA: ['usL', 'SPDR Dow Jones', 14],
+  RSP: ['usL', 'Invesco Equal-Weight S&P', 16],
+  IWB: ['usL', 'iShares Russell 1000'],
+  IWV: ['usL', 'iShares Russell 3000'],
+  VONE: ['usL', 'Vanguard Russell 1000'],
+  SPYG: ['usL', 'SPDR S&P 500 Growth', 17.5],
+  SPYV: ['usL', 'SPDR S&P 500 Value', 14],
+  VUG: ['usL', 'Vanguard Growth', 17.5],
+  SCHG: ['usL', 'Schwab Growth', 17.5],
+  IWF: ['usL', 'iShares Russell 1000 Growth', 17.5],
+  MGK: ['usL', 'Vanguard Mega-Cap Growth', 18.5],
+  VOOG: ['usL', 'Vanguard S&P 500 Growth', 17.5],
+  VONG: ['usL', 'Vanguard Russell 1000 Growth', 17.5],
+  VTV: ['usL', 'Vanguard Value', 14],
+  SCHV: ['usL', 'Schwab Value', 14],
+  IWD: ['usL', 'iShares Russell 1000 Value', 14],
+  MGV: ['usL', 'Vanguard Mega-Cap Value', 13.5],
+  VOOV: ['usL', 'Vanguard S&P 500 Value', 14],
+  VONV: ['usL', 'Vanguard Russell 1000 Value', 14],
+  RPG: ['usL', 'Invesco S&P 500 Pure Growth', 19],
+  RPV: ['usL', 'Invesco S&P 500 Pure Value', 18],
+  QUAL: ['usL', 'iShares Quality', 15],
+  MTUM: ['usL', 'iShares Momentum', 17],
+  VLUE: ['usL', 'iShares Value Factor', 16],
+  SIZE: ['usL', 'iShares Size Factor', 16],
+  USMV: ['usL', 'iShares Min Volatility', 12],
+  SPLV: ['usL', 'Invesco Low Volatility', 12],
+  SPHQ: ['usL', 'Invesco Quality', 15],
+  MOAT: ['usL', 'VanEck Wide Moat', 16],
+  COWZ: ['usL', 'Pacer US Cash Cows', 16],
+  CALF: ['usL', 'Pacer US Small Cash Cows', 20],
+  FNDX: ['usL', 'Schwab Fundamental Large', 15],
+  PRF: ['usL', 'Invesco FTSE RAFI 1000', 15],
+  IUSG: ['usL', 'iShares Core Growth', 17],
+  IUSV: ['usL', 'iShares Core Value', 14],
+  DFUS: ['usL', 'Dimensional US Equity'],
+  DFAC: ['usL', 'Dimensional US Core'],
+  AVUS: ['usL', 'Avantis US Equity'],
+  QQEW: ['usL', 'First Trust Nasdaq-100 Equal', 18],
+  FTEC: ['usL', 'Fidelity MSCI Tech', 21],
+  IYY: ['usL', 'iShares Dow Jones US'],
+  IWM: ['usS', 'iShares Russell 2000'],
+  VB: ['usS', 'Vanguard Small-Cap'],
+  SCHA: ['usS', 'Schwab Small-Cap'],
+  VTWO: ['usS', 'Vanguard Russell 2000'],
+  IJR: ['usS', 'iShares Core S&P Small'],
+  VIOO: ['usS', 'Vanguard S&P Small-600'],
+  SPSM: ['usS', 'SPDR Portfolio Small'],
+  AVUV: ['usS', 'Avantis Small Value', 20],
+  VBR: ['usS', 'Vanguard Small Value', 18.5],
+  VBK: ['usS', 'Vanguard Small Growth', 21],
+  IWN: ['usS', 'iShares Russell 2000 Value', 19],
+  IWO: ['usS', 'iShares Russell 2000 Growth', 22],
+  MDY: ['usS', 'SPDR Mid-Cap 400', 17.5],
+  IJH: ['usS', 'iShares Core Mid-Cap', 17.5],
+  VO: ['usS', 'Vanguard Mid-Cap', 17],
+  SCHM: ['usS', 'Schwab Mid-Cap', 17],
+  IWR: ['usS', 'iShares Russell Mid-Cap', 17],
+  VOT: ['usS', 'Vanguard Mid Growth', 19],
+  VOE: ['usS', 'Vanguard Mid Value', 16],
+  XMHQ: ['usS', 'Invesco Mid Quality', 17],
+  VXF: ['usS', 'Vanguard Extended Market', 19],
+  DFAS: ['usS', 'Dimensional US Small'],
+  SCHD: ['usL', 'Schwab US Dividend', 13.5],
+  VYM: ['usL', 'Vanguard High Dividend', 13.5],
+  VIG: ['usL', 'Vanguard Dividend Growth', 13.5],
+  DVY: ['usL', 'iShares Select Dividend', 14],
+  SDY: ['usL', 'SPDR Dividend Aristocrats', 14],
+  NOBL: ['usL', 'ProShares Aristocrats', 14],
+  HDV: ['usL', 'iShares Core High Dividend', 13.5],
+  DGRO: ['usL', 'iShares Dividend Growth', 13.5],
+  DGRW: ['usL', 'WisdomTree Quality Dividend', 14],
+  FDVV: ['usL', 'Fidelity High Dividend', 14],
+  SPYD: ['usL', 'SPDR Portfolio High Div', 14.5],
+  SPHD: ['usL', 'Invesco High Div Low Vol', 13],
+  DHS: ['usL', 'WisdomTree High Dividend', 13.5],
+  FVD: ['usL', 'First Trust Value Line Div', 13.5],
+  VXUS: ['intl', 'Vanguard Total Intl'],
+  VEU: ['intl', 'Vanguard All-World ex-US'],
+  IXUS: ['intl', 'iShares Total Intl'],
+  VEA: ['intl', 'Vanguard Developed'],
+  IEFA: ['intl', 'iShares Core EAFE'],
+  EFA: ['intl', 'iShares MSCI EAFE'],
+  SCHF: ['intl', 'Schwab Intl'],
+  SPDW: ['intl', 'SPDR Developed'],
+  IDEV: ['intl', 'iShares Core Intl Dev'],
+  VGK: ['intl', 'Vanguard Europe'],
+  IEUR: ['intl', 'iShares Core Europe'],
+  EZU: ['intl', 'iShares Eurozone', 18],
+  EWJ: ['intl', 'iShares Japan', 17],
+  BBJP: ['intl', 'JPMorgan Japan', 17],
+  DXJ: ['intl', 'WisdomTree Japan Hedged', 17],
+  HEFA: ['intl', 'iShares Hedged EAFE', 13],
+  EWU: ['intl', 'iShares UK', 17],
+  EWG: ['intl', 'iShares Germany', 19],
+  EWQ: ['intl', 'iShares France', 18],
+  EWL: ['intl', 'iShares Switzerland', 16],
+  EWC: ['intl', 'iShares Canada', 17],
+  EWA: ['intl', 'iShares Australia', 19],
+  EWY: ['intl', 'iShares South Korea', 24, 7.8],
+  EWT: ['intl', 'iShares Taiwan', 22, 7.8],
+  EWH: ['intl', 'iShares Hong Kong', 20],
+  EWS: ['intl', 'iShares Singapore', 18],
+  EFV: ['intl', 'iShares EAFE Value', 15.5],
+  EFG: ['intl', 'iShares EAFE Growth', 17],
+  SCZ: ['intl', 'iShares EAFE Small', 19],
+  VSS: ['intl', 'Vanguard Intl Small', 19],
+  GWX: ['intl', 'SPDR Intl Small', 19],
+  DLS: ['intl', 'WisdomTree Intl Small Div', 18],
+  IDV: ['intl', 'iShares Intl Select Div', 15.5],
+  VYMI: ['intl', 'Vanguard Intl High Div', 15],
+  VIGI: ['intl', 'Vanguard Intl Div Growth', 15.5],
+  ACWI: ['intl', 'iShares MSCI ACWI', 15],
+  VT: ['intl', 'Vanguard Total World', 15],
+  ACWX: ['intl', 'iShares ACWI ex-US'],
+  VWO: ['em', 'Vanguard Emerging Mkts'],
+  IEMG: ['em', 'iShares Core EM'],
+  EEM: ['em', 'iShares MSCI EM'],
+  SCHE: ['em', 'Schwab EM'],
+  SPEM: ['em', 'SPDR EM'],
+  EMXC: ['em', 'iShares EM ex-China', 19],
+  FRDM: ['em', 'Freedom 100 EM', 19],
+  DEM: ['em', 'WisdomTree EM High Div', 19],
+  MCHI: ['em', 'iShares China', 26],
+  FXI: ['em', 'iShares China Large-Cap', 27],
+  KWEB: ['em', 'KraneShares China Internet', 35],
+  INDA: ['em', 'iShares India', 20],
+  EPI: ['em', 'WisdomTree India', 21],
+  SMIN: ['em', 'iShares India Small', 24],
+  EWZ: ['em', 'iShares Brazil', 30],
+  EWW: ['em', 'iShares Mexico', 25],
+  ILF: ['em', 'iShares Latin America', 26],
+  EZA: ['em', 'iShares South Africa', 27],
+  TUR: ['em', 'iShares Turkey', 35],
+  VNM: ['em', 'VanEck Vietnam', 27],
+  EIDO: ['em', 'iShares Indonesia', 24],
+  THD: ['em', 'iShares Thailand', 22],
+  AGG: ['bond', 'iShares Core US Bond'],
+  BND: ['bond', 'Vanguard Total Bond'],
+  SCHZ: ['bond', 'Schwab US Bond'],
+  SPAB: ['bond', 'SPDR Aggregate'],
+  FBND: ['bond', 'Fidelity Total Bond', 5.5],
+  BSV: ['bond', 'Vanguard Short-Term Bond', 3],
+  BIV: ['bond', 'Vanguard Interm Bond', 6],
+  BLV: ['bond', 'Vanguard Long Bond', 11],
+  IUSB: ['bond', 'iShares Total USD Bond', 5.5],
+  MBB: ['bond', 'iShares MBS', 4.5],
+  VMBS: ['bond', 'Vanguard MBS', 4.5],
+  GNMA: ['bond', 'iShares GNMA', 4.5],
+  LQD: ['bond', 'iShares IG Corporate', 8],
+  VCIT: ['bond', 'Vanguard Interm Corp', 6.5],
+  VCSH: ['bond', 'Vanguard Short Corp', 3],
+  VCLT: ['bond', 'Vanguard Long Corp', 11],
+  IGSB: ['bond', 'iShares 1-5yr IG Corp', 3],
+  IGIB: ['bond', 'iShares 5-10yr IG Corp', 6.5],
+  USIG: ['bond', 'iShares Broad IG Corp', 7],
+  SPIB: ['bond', 'SPDR Interm Corp', 5],
+  FLOT: ['bond', 'iShares Floating Rate', 1.5, 4.6],
+  FLRN: ['bond', 'SPDR Floating Rate', 1.5, 4.6],
+  MUB: ['bond', 'iShares National Muni', 4.5, 3.9],
+  VTEB: ['bond', 'Vanguard Tax-Exempt', 4.5, 3.9],
+  TFI: ['bond', 'SPDR Muni', 4.5, 3.9],
+  SUB: ['bond', 'iShares Short Muni', 2, 3.4],
+  SHM: ['bond', 'SPDR Short Muni', 2, 3.4],
+  HYD: ['bond', 'VanEck High-Yield Muni', 7, 4.6],
+  BAB: ['bond', 'Invesco Build America', 7],
+  BNDX: ['bond', 'Vanguard Intl Bond', 4.5],
+  IAGG: ['bond', 'iShares Intl Aggregate', 4.5],
+  BNDW: ['bond', 'Vanguard Total World Bond', 5],
+  EMB: ['bond', 'iShares EM USD Bond', 9, 5.8],
+  VWOB: ['bond', 'Vanguard EM Gov Bond', 9, 5.8],
+  PCY: ['bond', 'Invesco EM Sovereign', 9.5, 5.8],
+  EBND: ['bond', 'SPDR EM Local Bond', 11, 5.6],
+  TLT: ['tsy', 'iShares 20+yr Treasury', 13],
+  VGLT: ['tsy', 'Vanguard Long Treasury', 12],
+  EDV: ['tsy', 'Vanguard Ext Duration', 20],
+  ZROZ: ['tsy', 'PIMCO 25+yr Zero', 22],
+  IEF: ['tsy', 'iShares 7-10yr Treasury', 7],
+  VGIT: ['tsy', 'Vanguard Interm Treasury', 5],
+  IEI: ['tsy', 'iShares 3-7yr Treasury', 4],
+  SHY: ['tsy', 'iShares 1-3yr Treasury', 2],
+  VGSH: ['tsy', 'Vanguard Short Treasury', 2],
+  SCHO: ['tsy', 'Schwab Short Treasury', 2],
+  SCHR: ['tsy', 'Schwab Interm Treasury', 5],
+  GOVT: ['tsy', 'iShares US Treasury', 5],
+  SHV: ['tsy', 'iShares Short Treasury', 0.8, 3.2],
+  TLH: ['tsy', 'iShares 10-20yr Treasury', 10],
+  SPTL: ['tsy', 'SPDR Long Treasury', 12],
+  TIP: ['tsy', 'iShares TIPS', 6, 4.3],
+  SCHP: ['tsy', 'Schwab TIPS', 6, 4.3],
+  VTIP: ['tsy', 'Vanguard Short TIPS', 2.5, 4.1],
+  STIP: ['tsy', 'iShares 0-5yr TIPS', 2.5, 4.1],
+  LTPZ: ['tsy', 'PIMCO Long TIPS', 13, 4.5],
+  HYG: ['hy', 'iShares High Yield'],
+  JNK: ['hy', 'SPDR High Yield'],
+  SHYG: ['hy', 'iShares 0-5yr HY', 6],
+  SJNK: ['hy', 'SPDR Short HY', 6],
+  USHY: ['hy', 'iShares Broad HY', 9],
+  ANGL: ['hy', 'VanEck Fallen Angel', 9.5],
+  FALN: ['hy', 'iShares Fallen Angels', 9.5],
+  BKLN: ['hy', 'Invesco Senior Loan', 6, 5.6],
+  SRLN: ['hy', 'SPDR Blackstone Loan', 6, 5.6],
+  HYLB: ['hy', 'Xtrackers High Yield', 9],
+  BIL: ['cash', 'SPDR 1-3mo T-Bill'],
+  SGOV: ['cash', 'iShares 0-3mo Treasury'],
+  USFR: ['cash', 'WisdomTree Floating Treasury'],
+  TFLO: ['cash', 'iShares Treasury Floating'],
+  CLIP: ['cash', 'Global X 1-3mo T-Bill'],
+  VMFXX: ['cash', 'Vanguard Federal MMF'],
+  VUSXX: ['cash', 'Vanguard Treasury MMF'],
+  SPAXX: ['cash', 'Fidelity Government MMF'],
+  SPRXX: ['cash', 'Fidelity Money Market'],
+  FDRXX: ['cash', 'Fidelity Gov Cash Reserves'],
+  SWVXX: ['cash', 'Schwab Value Advantage MMF'],
+  SNVXX: ['cash', 'Schwab Government MMF'],
+  XLK: ['usL', 'Tech Select SPDR', 21],
+  VGT: ['usL', 'Vanguard Info Tech', 21],
+  IYW: ['usL', 'iShares US Tech', 21],
+  XLF: ['usL', 'Financials SPDR', 19],
+  VFH: ['usL', 'Vanguard Financials', 19],
+  KRE: ['usL', 'SPDR Regional Banks', 28],
+  KBE: ['usL', 'SPDR Banks', 26],
+  KBWB: ['usL', 'Invesco Bank', 26],
+  IAI: ['usL', 'iShares Broker-Dealers', 24],
+  XLV: ['usL', 'Health Care SPDR', 14],
+  VHT: ['usL', 'Vanguard Health Care', 14],
+  IYH: ['usL', 'iShares US Healthcare', 14],
+  IBB: ['usL', 'iShares Biotech', 24],
+  XBI: ['usL', 'SPDR Biotech', 30],
+  IHI: ['usL', 'iShares Medical Devices', 17],
+  IHE: ['usL', 'iShares Pharma', 16],
+  XLE: ['usL', 'Energy SPDR', 22],
+  VDE: ['usL', 'Vanguard Energy', 23],
+  XOP: ['usL', 'SPDR Oil & Gas E&P', 32],
+  OIH: ['usL', 'VanEck Oil Services', 33],
+  AMLP: ['usL', 'Alerian MLP', 20, 7.5],
+  MLPX: ['usL', 'Global X MLP Infra', 19, 7.3],
+  XLI: ['usL', 'Industrials SPDR', 16],
+  VIS: ['usL', 'Vanguard Industrials', 16],
+  ITA: ['usL', 'iShares Aerospace & Defense', 18],
+  PPA: ['usL', 'Invesco Aerospace', 17],
+  XAR: ['usL', 'SPDR Aerospace', 20],
+  IYT: ['usL', 'iShares Transportation', 20],
+  JETS: ['usL', 'US Global Jets', 30],
+  XLY: ['usL', 'Cons Discretionary SPDR', 18],
+  VCR: ['usL', 'Vanguard Cons Disc', 18],
+  XRT: ['usL', 'SPDR Retail', 24],
+  IBUY: ['usL', 'Amplify Online Retail', 28],
+  XLP: ['usL', 'Cons Staples SPDR', 12],
+  VDC: ['usL', 'Vanguard Cons Staples', 12],
+  IYK: ['usL', 'iShares Cons Staples', 12],
+  XLU: ['usL', 'Utilities SPDR', 13],
+  VPU: ['usL', 'Vanguard Utilities', 13],
+  IDU: ['usL', 'iShares US Utilities', 13],
+  XLB: ['usL', 'Materials SPDR', 17],
+  VAW: ['usL', 'Vanguard Materials', 17],
+  IYM: ['usL', 'iShares Basic Materials', 18],
+  XLC: ['usL', 'Comm Services SPDR', 18],
+  VOX: ['usL', 'Vanguard Comm Services', 18],
+  SMH: ['usL', 'VanEck Semiconductor', 28],
+  SOXX: ['usL', 'iShares Semiconductor', 28],
+  XSD: ['usL', 'SPDR Semiconductor', 30],
+  PSI: ['usL', 'Invesco Semiconductors', 29],
+  IGV: ['usL', 'iShares Software', 26],
+  WCLD: ['usL', 'WisdomTree Cloud', 32],
+  SKYY: ['usL', 'First Trust Cloud', 28],
+  CLOU: ['usL', 'Global X Cloud', 30],
+  HACK: ['usL', 'Amplify Cybersecurity', 24],
+  CIBR: ['usL', 'First Trust Cybersecurity', 24],
+  BUG: ['usL', 'Global X Cybersecurity', 26],
+  ARKK: ['usL', 'ARK Innovation', 38],
+  ARKW: ['usL', 'ARK Next Gen Internet', 38],
+  ARKG: ['usL', 'ARK Genomic', 38],
+  ARKQ: ['usL', 'ARK Autonomous Tech', 32],
+  ARKF: ['usL', 'ARK Fintech', 34],
+  BOTZ: ['usL', 'Global X Robotics & AI', 26],
+  ROBO: ['usL', 'ROBO Global Robotics', 24],
+  IRBO: ['usL', 'iShares Robotics & AI', 26],
+  AIQ: ['usL', 'Global X AI & Tech', 25],
+  TAN: ['usL', 'Invesco Solar', 38],
+  ICLN: ['usL', 'iShares Clean Energy', 30],
+  PBW: ['usL', 'Invesco WilderHill Clean', 36],
+  QCLN: ['usL', 'First Trust Clean Energy', 34],
+  FAN: ['usL', 'First Trust Wind', 24],
+  LIT: ['usL', 'Global X Lithium & Battery', 30],
+  REMX: ['usL', 'VanEck Rare Earth', 34],
+  URA: ['usL', 'Global X Uranium', 34],
+  URNM: ['usL', 'Sprott Uranium Miners', 40],
+  ESPO: ['usL', 'VanEck Video Gaming', 24],
+  BETZ: ['usL', 'Roundhill Sports Betting', 30],
+  MSOS: ['usL', 'AdvisorShares US Cannabis', 45],
+  MJ: ['usL', 'Amplify Cannabis', 40],
+  GRID: ['usL', 'First Trust Smart Grid', 22],
+  PAVE: ['usL', 'Global X Infrastructure', 19],
+  IFRA: ['usL', 'iShares US Infrastructure', 18],
+  IGF: ['usL', 'iShares Global Infra', 15],
+  MAGS: ['usL', 'Roundhill Magnificent Seven', 28],
+  FFTY: ['usL', 'Innovator IBD 50', 28],
+  SPMO: ['usL', 'Invesco S&P 500 Momentum', 18],
+  VNQ: ['reit', 'Vanguard Real Estate'],
+  SCHH: ['reit', 'Schwab US REIT'],
+  IYR: ['reit', 'iShares US Real Estate'],
+  XLRE: ['reit', 'Real Estate SPDR'],
+  RWR: ['reit', 'SPDR DJ REIT'],
+  USRT: ['reit', 'iShares Core US REIT'],
+  FREL: ['reit', 'Fidelity Real Estate'],
+  REZ: ['reit', 'iShares Residential', 19],
+  VNQI: ['reit', 'Vanguard Global ex-US RE', 17],
+  REET: ['reit', 'iShares Global REIT', 17],
+  REM: ['reit', 'iShares Mortgage REIT', 24, 7.5],
+  MORT: ['reit', 'VanEck Mortgage REIT', 24, 7.5],
+  SRVR: ['reit', 'Pacer Data Center REIT', 20],
+  GLD: ['gold', 'SPDR Gold'],
+  IAU: ['gold', 'iShares Gold'],
+  GLDM: ['gold', 'SPDR Gold MiniShares'],
+  SGOL: ['gold', 'abrdn Gold'],
+  SLV: ['gold', 'iShares Silver', 26],
+  SIVR: ['gold', 'abrdn Silver', 26],
+  PPLT: ['gold', 'abrdn Platinum', 24],
+  PALL: ['gold', 'abrdn Palladium', 32],
+  GDX: ['gold', 'VanEck Gold Miners', 32],
+  GDXJ: ['gold', 'VanEck Junior Gold Miners', 38],
+  SIL: ['gold', 'Global X Silver Miners', 36],
+  RING: ['gold', 'iShares Gold Miners', 33],
+  SILJ: ['gold', 'Amplify Junior Silver', 42],
+  DBC: ['cmd', 'Invesco Commodity'],
+  PDBC: ['cmd', 'Invesco Optimum Commodity'],
+  GSG: ['cmd', 'iShares GSCI Commodity'],
+  DJP: ['cmd', 'iPath Commodity', 15],
+  USO: ['cmd', 'US Oil Fund', 32],
+  BNO: ['cmd', 'US Brent Oil', 30],
+  UNG: ['cmd', 'US Natural Gas', 52],
+  DBA: ['cmd', 'Invesco Agriculture', 14],
+  CORN: ['cmd', 'Teucrium Corn', 22],
+  WEAT: ['cmd', 'Teucrium Wheat', 26],
+  SOYB: ['cmd', 'Teucrium Soybean', 18],
+  CANE: ['cmd', 'Teucrium Sugar', 24],
+  MOO: ['cmd', 'VanEck Agribusiness', 18],
+  COPX: ['cmd', 'Global X Copper Miners', 32],
+  XME: ['cmd', 'SPDR Metals & Mining', 30],
+  IBIT: ['crypto', 'iShares Bitcoin'],
+  FBTC: ['crypto', 'Fidelity Bitcoin'],
+  GBTC: ['crypto', 'Grayscale Bitcoin'],
+  ARKB: ['crypto', 'ARK 21Shares Bitcoin'],
+  BITB: ['crypto', 'Bitwise Bitcoin'],
+  HODL: ['crypto', 'VanEck Bitcoin'],
+  BRRR: ['crypto', 'Valkyrie Bitcoin'],
+  BTCO: ['crypto', 'Invesco Bitcoin'],
+  EZBC: ['crypto', 'Franklin Bitcoin'],
+  BITO: ['crypto', 'ProShares Bitcoin Strategy'],
+  ETHA: ['crypto', 'iShares Ethereum', 70],
+  ETHE: ['crypto', 'Grayscale Ethereum', 70],
+  ETHW: ['crypto', 'Bitwise Ethereum', 70],
+  BITQ: ['crypto', 'Bitwise Crypto Industry', 55],
+  JEPI: ['usL', 'JPMorgan Equity Premium', 11, 6.3],
+  JEPQ: ['usL', 'JPMorgan Nasdaq Premium', 14, 6.6],
+  DIVO: ['usL', 'Amplify CWP Dividend', 12, 6.5],
+  QYLD: ['usL', 'Global X Nasdaq Covered Call', 13, 5.8],
+  XYLD: ['usL', 'Global X S&P Covered Call', 12, 5.6],
+  RYLD: ['usL', 'Global X Russell Covered Call', 13, 5.6],
+  SVOL: ['usL', 'Simplify Volatility Premium', 15, 6],
+  BUFR: ['usL', 'FT Vest Buffer', 9, 5.4],
+  PUTW: ['usL', 'WisdomTree PutWrite', 11, 5.8],
+  JAAA: ['hy', 'Janus AAA CLO', 2, 5.2],
+  JBBB: ['hy', 'Janus BBB CLO', 5, 5.8],
+  CLOZ: ['hy', 'Panagram BB CLO', 6, 6.3],
+  TQQQ: ['usL', 'ProShares UltraPro QQQ 3x', 62, 9],
+  QLD: ['usL', 'ProShares Ultra QQQ 2x', 42, 8.5],
+  SSO: ['usL', 'ProShares Ultra S&P 2x', 32, 8.2],
+  UPRO: ['usL', 'ProShares UltraPro S&P 3x', 48, 8.6],
+  SPXL: ['usL', 'Direxion S&P 3x Bull', 48, 8.6],
+  UDOW: ['usL', 'ProShares UltraPro Dow 3x', 42, 8.2],
+  SOXL: ['usL', 'Direxion Semis 3x Bull', 85, 9],
+  TECL: ['usL', 'Direxion Tech 3x Bull', 65, 9],
+  TNA: ['usL', 'Direxion Small 3x Bull', 70, 8.5],
+  FAS: ['usL', 'Direxion Financial 3x Bull', 58, 8],
+  NVDL: ['usL', 'GraniteShares 2x NVDA', 90, 9],
+  TSLL: ['usL', 'Direxion 2x TSLA', 95, 9],
+  SH: ['usL', 'ProShares Short S&P', 15.5, -6],
+  PSQ: ['usL', 'ProShares Short QQQ', 20, -6.5],
+  SQQQ: ['usL', 'ProShares UltraPro Short QQQ', 60, -18],
+  SDS: ['usL', 'ProShares UltraShort S&P', 31, -13],
+  SPXU: ['usL', 'ProShares UltraPro Short S&P', 47, -19],
+  SOXS: ['usL', 'Direxion Semis 3x Bear', 85, -25],
+  TZA: ['usL', 'Direxion Small 3x Bear', 70, -22],
+  UVXY: ['usL', 'ProShares Ultra VIX', 95, -35],
+  VXX: ['usL', 'iPath VIX Short-Term', 60, -25],
+  VFIAX: ['usL', 'Vanguard 500 Index Adm'],
+  VFINX: ['usL', 'Vanguard 500 Index Inv'],
+  VTSAX: ['usL', 'Vanguard Total Stock Adm'],
+  VTSMX: ['usL', 'Vanguard Total Stock Inv'],
+  VIGAX: ['usL', 'Vanguard Growth Index Adm', 17.5],
+  VVIAX: ['usL', 'Vanguard Value Index Adm', 14],
+  VLCAX: ['usL', 'Vanguard Large-Cap Adm'],
+  VDIGX: ['usL', 'Vanguard Dividend Growth', 13.5],
+  VDADX: ['usL', 'Vanguard Div Appreciation Adm', 13.5],
+  VEIPX: ['usL', 'Vanguard Equity-Income', 13.5],
+  VEIRX: ['usL', 'Vanguard Equity-Income Adm', 13.5],
+  VHYAX: ['usL', 'Vanguard High Div Index Adm', 13.5],
+  VQNPX: ['usL', 'Vanguard Growth & Income'],
+  VGIAX: ['usL', 'Vanguard Growth & Income Adm'],
+  VPMAX: ['usL', 'Vanguard PRIMECAP Adm', 17],
+  VPMCX: ['usL', 'Vanguard PRIMECAP', 17],
+  VPCCX: ['usL', 'Vanguard PRIMECAP Core', 16.5],
+  VHCAX: ['usL', 'Vanguard Capital Opportunity Adm', 18],
+  VWUSX: ['usL', 'Vanguard US Growth', 18.5],
+  VWNDX: ['usL', 'Vanguard Windsor', 15.5],
+  VWNEX: ['usL', 'Vanguard Windsor Adm', 15.5],
+  VWNFX: ['usL', 'Vanguard Windsor II', 14.5],
+  VWNAX: ['usL', 'Vanguard Windsor II Adm', 14.5],
+  VGHCX: ['usL', 'Vanguard Health Care', 14.5],
+  VGHAX: ['usL', 'Vanguard Health Care Adm', 14.5],
+  VGENX: ['usL', 'Vanguard Energy', 23],
+  VGELX: ['usL', 'Vanguard Energy Adm', 23],
+  VGPMX: ['usL', 'Vanguard Global Capital Cycles', 24],
+  VSEQX: ['usL', 'Vanguard Strategic Equity', 18],
+  VTCLX: ['usL', 'Vanguard Tax-Managed Cap App'],
+  VTMFX: ['usL', 'Vanguard Tax-Managed Balanced', 8.5, 5.8],
+  VSMAX: ['usS', 'Vanguard Small-Cap Adm'],
+  VSGAX: ['usS', 'Vanguard Small Growth Adm', 21],
+  VSIAX: ['usS', 'Vanguard Small Value Adm', 18.5],
+  VIMAX: ['usS', 'Vanguard Mid-Cap Adm', 17],
+  VMGMX: ['usS', 'Vanguard Mid Growth Adm', 19],
+  VMVAX: ['usS', 'Vanguard Mid Value Adm', 16],
+  VEXAX: ['usS', 'Vanguard Extended Mkt Adm', 19],
+  VSTCX: ['usS', 'Vanguard Strategic Small', 19],
+  VEVFX: ['usS', 'Vanguard Explorer Value', 19],
+  VEXPX: ['usS', 'Vanguard Explorer', 20],
+  VTIAX: ['intl', 'Vanguard Total Intl Adm'],
+  VGTSX: ['intl', 'Vanguard Total Intl Inv'],
+  VTMGX: ['intl', 'Vanguard Developed Adm'],
+  VFWAX: ['intl', 'Vanguard FTSE All-World ex-US Adm'],
+  VTWAX: ['intl', 'Vanguard Total World Adm', 15],
+  VHGEX: ['intl', 'Vanguard Global Equity', 15.5],
+  VINEX: ['intl', 'Vanguard Intl Explorer', 19],
+  VWIGX: ['intl', 'Vanguard Intl Growth', 19],
+  VWILX: ['intl', 'Vanguard Intl Growth Adm', 19],
+  VTRIX: ['intl', 'Vanguard Intl Value', 16],
+  VEMAX: ['em', 'Vanguard EM Index Adm'],
+  VEIEX: ['em', 'Vanguard EM Index Inv'],
+  VBTLX: ['bond', 'Vanguard Total Bond Adm'],
+  VBMFX: ['bond', 'Vanguard Total Bond Inv'],
+  VBILX: ['bond', 'Vanguard Interm Bond Adm', 6],
+  VBIRX: ['bond', 'Vanguard Short Bond Adm', 3],
+  VBLAX: ['bond', 'Vanguard Long Bond Adm', 11],
+  VFIDX: ['bond', 'Vanguard Interm IG Adm', 6],
+  VFSUX: ['bond', 'Vanguard Short IG Adm', 3],
+  VWITX: ['bond', 'Vanguard Interm Muni', 4.5, 3.9],
+  VWIUX: ['bond', 'Vanguard Interm Muni Adm', 4.5, 3.9],
+  VWLUX: ['bond', 'Vanguard Long Muni Adm', 6, 4.1],
+  VMLUX: ['bond', 'Vanguard Ltd Muni Adm', 2, 3.4],
+  VWALX: ['bond', 'Vanguard High-Yield Muni Adm', 7, 4.6],
+  VWAHX: ['bond', 'Vanguard High-Yield Muni', 7, 4.6],
+  VTABX: ['bond', 'Vanguard Total Intl Bond Adm', 4.5],
+  VTAPX: ['bond', 'Vanguard Short TIPS Adm', 2.5, 4.1],
+  VIPSX: ['bond', 'Vanguard Inflation-Protected', 6, 4.3],
+  VAIPX: ['bond', 'Vanguard Inflation-Prot Adm', 6, 4.3],
+  VWEHX: ['hy', 'Vanguard High-Yield Corp', 8],
+  VWEAX: ['hy', 'Vanguard High-Yield Corp Adm', 8],
+  VWELX: ['bal', 'Vanguard Wellington'],
+  VWENX: ['bal', 'Vanguard Wellington Adm'],
+  VWINX: ['bal', 'Vanguard Wellesley', 7],
+  VWIAX: ['bal', 'Vanguard Wellesley Adm', 7],
+  VGSTX: ['bal', 'Vanguard STAR'],
+  VBIAX: ['bal', 'Vanguard Balanced Index', 9.5],
+  VASGX: ['bal', 'Vanguard LifeStrategy Growth', 12.5, 6.7],
+  VSMGX: ['bal', 'Vanguard LifeStrategy Moderate', 10, 6.2],
+  VSCGX: ['bal', 'Vanguard LifeStrategy Conservative', 7.5, 5.6],
+  VASIX: ['bal', 'Vanguard LifeStrategy Income', 5.5, 5.1],
+  VTINX: ['bal', 'Vanguard Target Retirement Income', 6.5, 5.4],
+  VTWNX: ['bal', 'Vanguard Target 2020', 8, 5.8],
+  VTTVX: ['bal', 'Vanguard Target 2025', 9, 6],
+  VTHRX: ['bal', 'Vanguard Target 2030', 10.5, 6.3],
+  VTTHX: ['bal', 'Vanguard Target 2035', 11.5, 6.5],
+  VFORX: ['bal', 'Vanguard Target 2040', 12.5, 6.7],
+  VTIVX: ['bal', 'Vanguard Target 2045', 13.5, 6.9],
+  VFIFX: ['bal', 'Vanguard Target 2050', 14, 7],
+  VFFVX: ['bal', 'Vanguard Target 2055', 14, 7],
+  VTTSX: ['bal', 'Vanguard Target 2060', 14, 7],
+  VLXVX: ['bal', 'Vanguard Target 2065', 14, 7],
+  VSVNX: ['bal', 'Vanguard Target 2070', 14, 7],
+  VGSLX: ['reit', 'Vanguard REIT Index Adm'],
+  VGSIX: ['reit', 'Vanguard REIT Index Inv'],
+  FXAIX: ['usL', 'Fidelity 500 Index'],
+  FNILX: ['usL', 'Fidelity ZERO Large Cap'],
+  FZROX: ['usL', 'Fidelity ZERO Total Market'],
+  FSKAX: ['usL', 'Fidelity Total Market'],
+  FCNTX: ['usL', 'Fidelity Contrafund', 17],
+  FCNKX: ['usL', 'Fidelity Contrafund K', 17],
+  FMAGX: ['usL', 'Fidelity Magellan', 17],
+  FDGRX: ['usL', 'Fidelity Growth Company', 20],
+  FBGRX: ['usL', 'Fidelity Blue Chip Growth', 19],
+  FOCPX: ['usL', 'Fidelity OTC', 20],
+  FTRNX: ['usL', 'Fidelity Trend', 18],
+  FDCAX: ['usL', 'Fidelity Capital Appreciation', 17],
+  FGRIX: ['usL', 'Fidelity Growth & Income', 14.5],
+  FEQIX: ['usL', 'Fidelity Equity-Income', 14],
+  FDVLX: ['usL', 'Fidelity Value', 16],
+  FLPSX: ['usL', 'Fidelity Low-Priced Stock', 15.5],
+  FDEQX: ['usL', 'Fidelity Disciplined Equity', 15.5],
+  FLCSX: ['usL', 'Fidelity Large Cap Stock', 15.5],
+  FSPGX: ['usL', 'Fidelity Large Growth Index', 17.5],
+  FLCOX: ['usL', 'Fidelity Large Value Index', 14],
+  FSCSX: ['usL', 'Fidelity Software', 26],
+  FSELX: ['usL', 'Fidelity Semiconductors', 30],
+  FSPTX: ['usL', 'Fidelity Technology', 24],
+  FSPHX: ['usL', 'Fidelity Health Care', 18],
+  FSMEX: ['usL', 'Fidelity Medical Tech', 19],
+  FSRPX: ['usL', 'Fidelity Retailing', 20],
+  FSUTX: ['usL', 'Fidelity Utilities', 13],
+  FSENX: ['usL', 'Fidelity Energy', 24],
+  FSAGX: ['usL', 'Fidelity Gold', 32],
+  FSDAX: ['usL', 'Fidelity Defense', 18],
+  FSSNX: ['usS', 'Fidelity Small Cap Index'],
+  FSMDX: ['usS', 'Fidelity Mid Cap Index', 17],
+  FSMAX: ['usS', 'Fidelity Extended Market', 19],
+  FCPGX: ['usS', 'Fidelity Small Cap Growth', 21],
+  FSLCX: ['usS', 'Fidelity Small Cap Stock', 19],
+  FZILX: ['intl', 'Fidelity ZERO Intl'],
+  FTIHX: ['intl', 'Fidelity Total Intl'],
+  FSPSX: ['intl', 'Fidelity Intl Index'],
+  FIGFX: ['intl', 'Fidelity Intl Growth', 17],
+  FDIVX: ['intl', 'Fidelity Diversified Intl', 17],
+  FOSFX: ['intl', 'Fidelity Overseas', 17],
+  FPADX: ['em', 'Fidelity EM Index'],
+  FEMKX: ['em', 'Fidelity Emerging Markets', 21],
+  FXNAX: ['bond', 'Fidelity US Bond Index'],
+  FTBFX: ['bond', 'Fidelity Total Bond'],
+  FBNDX: ['bond', 'Fidelity Investment Grade'],
+  FUAMX: ['bond', 'Fidelity Interm Treasury Index', 5],
+  FUMBX: ['bond', 'Fidelity Short Treasury Index', 2],
+  FNBGX: ['bond', 'Fidelity Long Treasury Index', 12],
+  FIPDX: ['bond', 'Fidelity TIPS Index', 6, 4.3],
+  FGMNX: ['bond', 'Fidelity GNMA', 4.5],
+  FTABX: ['bond', 'Fidelity Tax-Free Bond', 5, 4],
+  SPHIX: ['hy', 'Fidelity High Income', 8.5],
+  FAGIX: ['hy', 'Fidelity Capital & Income', 9.5],
+  FFRHX: ['hy', 'Fidelity Floating Rate', 5, 5.4],
+  FBALX: ['bal', 'Fidelity Balanced', 10.5],
+  FPURX: ['bal', 'Fidelity Puritan', 10.5],
+  FDEWX: ['bal', 'Fidelity Freedom Index 2055', 14, 7],
+  FIPFX: ['bal', 'Fidelity Freedom Index 2050', 14, 7],
+  SWPPX: ['usL', 'Schwab S&P 500'],
+  SWTSX: ['usL', 'Schwab Total Market'],
+  SWLGX: ['usL', 'Schwab US Large Growth', 17.5],
+  SNXFX: ['usL', 'Schwab 1000'],
+  SWSSX: ['usS', 'Schwab Small-Cap'],
+  SWISX: ['intl', 'Schwab Intl Index'],
+  SWAGX: ['bond', 'Schwab US Aggregate'],
+  AGTHX: ['usL', 'American Growth Fund', 17],
+  AMCPX: ['usL', 'American AMCAP', 16.5],
+  ANCFX: ['usL', 'American Fundamental Inv', 15.5],
+  AWSHX: ['usL', 'American Washington Mutual', 14.5],
+  AIVSX: ['usL', 'American Inv Co of America', 15],
+  AMRMX: ['usL', 'American Mutual', 13.5],
+  ANEFX: ['usL', 'American New Economy', 17.5],
+  AEPGX: ['intl', 'American EuroPacific Growth', 17],
+  ANWPX: ['intl', 'American New Perspective', 16],
+  SMCWX: ['intl', 'American SMALLCAP World', 19],
+  NEWFX: ['intl', 'American New World', 18],
+  CWGIX: ['intl', 'American Capital World G&I', 15.5],
+  ABALX: ['bal', 'American Balanced'],
+  AMECX: ['bal', 'American Income Fund', 9],
+  CAIBX: ['bal', 'American Capital Income Builder', 9.5],
+  ABNDX: ['bond', 'American Bond Fund', 5.5],
+  AIBAX: ['bond', 'American Interm Bond', 3.5],
+  AHITX: ['hy', 'American High-Income Trust', 9],
+  PRGFX: ['usL', 'T Rowe Growth Stock', 18],
+  TRBCX: ['usL', 'T Rowe Blue Chip', 18],
+  PRDGX: ['usL', 'T Rowe Dividend Growth', 13.5],
+  PRFDX: ['usL', 'T Rowe Equity Income', 14],
+  PRNHX: ['usL', 'T Rowe New Horizons', 21],
+  PRMTX: ['usL', 'T Rowe Comm & Tech', 22],
+  PRHSX: ['usL', 'T Rowe Health Sciences', 19],
+  TRMCX: ['usL', 'T Rowe Mid Value', 16],
+  RPMGX: ['usL', 'T Rowe Mid Growth', 18],
+  PRWCX: ['bal', 'T Rowe Capital Appreciation', 10.5],
+  RPBAX: ['bal', 'T Rowe Balanced', 10],
+  PTTRX: ['bond', 'PIMCO Total Return Instl', 6],
+  PTTAX: ['bond', 'PIMCO Total Return A', 6],
+  PFORX: ['bond', 'PIMCO Foreign Bond Hedged', 5],
+  DBLTX: ['bond', 'DoubleLine Total Return', 5],
+  DLTNX: ['bond', 'DoubleLine Total Return N', 5],
+  MWTRX: ['bond', 'Met West Total Return M', 5.5],
+  MWTIX: ['bond', 'Met West Total Return I', 5.5],
+  DODIX: ['bond', 'Dodge & Cox Income', 5.5],
+  BAGIX: ['bond', 'Baird Aggregate', 5.5],
+  BCOIX: ['bond', 'Baird Core Plus', 5.5],
+  LSBDX: ['bond', 'Loomis Sayles Bond', 7.5],
+  PONAX: ['bond', 'PIMCO Income A', 7],
+  PIMIX: ['bond', 'PIMCO Income Instl', 7],
+  DODGX: ['usL', 'Dodge & Cox Stock', 16],
+  OAKMX: ['usL', 'Oakmark Fund', 16],
+  NYVTX: ['usL', 'Davis NY Venture', 16],
+  SEQUX: ['usL', 'Sequoia Fund', 16],
+  FAIRX: ['usL', 'Fairholme Fund', 22],
+  PRBLX: ['usL', 'Parnassus Core Equity', 14],
+  ARGFX: ['usL', 'Ariel Fund', 18],
+  BGRFX: ['usL', 'Baron Growth', 18],
+  BPTRX: ['usL', 'Baron Partners', 30],
+  HACAX: ['usL', 'Harbor Capital Appreciation', 19],
+  POGRX: ['usL', 'PRIMECAP Odyssey Growth', 18],
+  POSKX: ['usL', 'PRIMECAP Odyssey Stock', 16],
+  POAGX: ['usL', 'PRIMECAP Odyssey Aggressive', 20],
+  FPACX: ['usL', 'FPA Crescent', 11],
+  DODFX: ['intl', 'Dodge & Cox Intl', 17],
+  OAKIX: ['intl', 'Oakmark Intl', 18],
+  DODWX: ['intl', 'Dodge & Cox Global', 16],
+  DODBX: ['bal', 'Dodge & Cox Balanced', 10.5],
+  OAKBX: ['bal', 'Oakmark Equity & Income', 10],
+  MALOX: ['bal', 'BlackRock Global Allocation', 10],
+  MDLOX: ['bal', 'BlackRock Global Alloc A', 10],
+  JABAX: ['bal', 'Janus Balanced', 10],
+  FKINX: ['bal', 'Franklin Income A', 8, 5.6],
+  TPINX: ['bond', 'Templeton Global Bond', 7, 4.8],
+  AAPL: ['usL', 'Apple', 28],
+  MSFT: ['usL', 'Microsoft', 26],
+  NVDA: ['usL', 'NVIDIA', 45],
+  GOOGL: ['usL', 'Alphabet A', 28],
+  GOOG: ['usL', 'Alphabet C', 28],
+  AMZN: ['usL', 'Amazon', 30],
+  META: ['usL', 'Meta Platforms', 35],
+  TSLA: ['usL', 'Tesla', 55],
+  AVGO: ['usL', 'Broadcom', 38],
+  ORCL: ['usL', 'Oracle', 28],
+  CRM: ['usL', 'Salesforce', 32],
+  ADBE: ['usL', 'Adobe', 30],
+  NFLX: ['usL', 'Netflix', 35],
+  AMD: ['usL', 'AMD', 48],
+  INTC: ['usL', 'Intel', 38],
+  QCOM: ['usL', 'Qualcomm', 32],
+  TXN: ['usL', 'Texas Instruments', 26],
+  MU: ['usL', 'Micron', 42],
+  AMAT: ['usL', 'Applied Materials', 34],
+  LRCX: ['usL', 'Lam Research', 35],
+  KLAC: ['usL', 'KLA Corp', 33],
+  ADI: ['usL', 'Analog Devices', 28],
+  NXPI: ['usL', 'NXP Semi', 32],
+  MRVL: ['usL', 'Marvell', 42],
+  ON: ['usL', 'ON Semi', 40],
+  MCHP: ['usL', 'Microchip', 34],
+  TSM: ['usL', 'Taiwan Semiconductor', 32],
+  ASML: ['usL', 'ASML Holding', 34],
+  ARM: ['usL', 'Arm Holdings', 48],
+  SMCI: ['usL', 'Super Micro', 65],
+  DELL: ['usL', 'Dell Technologies', 35],
+  HPQ: ['usL', 'HP Inc', 26],
+  HPE: ['usL', 'HP Enterprise', 28],
+  IBM: ['usL', 'IBM', 20],
+  ACN: ['usL', 'Accenture', 22],
+  CSCO: ['usL', 'Cisco', 20],
+  ANET: ['usL', 'Arista Networks', 35],
+  PANW: ['usL', 'Palo Alto Networks', 32],
+  CRWD: ['usL', 'CrowdStrike', 40],
+  ZS: ['usL', 'Zscaler', 42],
+  FTNT: ['usL', 'Fortinet', 32],
+  OKTA: ['usL', 'Okta', 40],
+  NET: ['usL', 'Cloudflare', 45],
+  DDOG: ['usL', 'Datadog', 40],
+  SNOW: ['usL', 'Snowflake', 45],
+  MDB: ['usL', 'MongoDB', 45],
+  PLTR: ['usL', 'Palantir', 50],
+  NOW: ['usL', 'ServiceNow', 30],
+  WDAY: ['usL', 'Workday', 30],
+  TEAM: ['usL', 'Atlassian', 40],
+  SHOP: ['usL', 'Shopify', 45],
+  SQ: ['usL', 'Block', 45],
+  PYPL: ['usL', 'PayPal', 32],
+  INTU: ['usL', 'Intuit', 26],
+  ADSK: ['usL', 'Autodesk', 28],
+  SNPS: ['usL', 'Synopsys', 28],
+  CDNS: ['usL', 'Cadence Design', 28],
+  ROP: ['usL', 'Roper', 20],
+  UBER: ['usL', 'Uber', 34],
+  LYFT: ['usL', 'Lyft', 48],
+  ABNB: ['usL', 'Airbnb', 34],
+  DASH: ['usL', 'DoorDash', 38],
+  SPOT: ['usL', 'Spotify', 35],
+  RBLX: ['usL', 'Roblox', 45],
+  PINS: ['usL', 'Pinterest', 38],
+  SNAP: ['usL', 'Snap', 50],
+  ROKU: ['usL', 'Roku', 50],
+  TTD: ['usL', 'Trade Desk', 40],
+  APP: ['usL', 'AppLovin', 50],
+  U: ['usL', 'Unity Software', 50],
+  SOFI: ['usL', 'SoFi', 50],
+  HOOD: ['usL', 'Robinhood', 50],
+  COIN: ['usL', 'Coinbase', 60],
+  MSTR: ['usL', 'MicroStrategy', 75],
+  GME: ['usL', 'GameStop', 70],
+  AMC: ['usL', 'AMC Entertainment', 75],
+  T: ['usL', 'AT&T', 20],
+  VZ: ['usL', 'Verizon', 18],
+  TMUS: ['usL', 'T-Mobile', 20],
+  CMCSA: ['usL', 'Comcast', 22],
+  DIS: ['usL', 'Disney', 26],
+  WBD: ['usL', 'Warner Bros Discovery', 38],
+  PARA: ['usL', 'Paramount', 40],
+  EA: ['usL', 'Electronic Arts', 24],
+  TTWO: ['usL', 'Take-Two', 28],
+  LYV: ['usL', 'Live Nation', 28],
+  'BRK.B': ['usL', 'Berkshire Hathaway', 20],
+  JPM: ['usL', 'JPMorgan', 24],
+  BAC: ['usL', 'Bank of America', 26],
+  WFC: ['usL', 'Wells Fargo', 26],
+  C: ['usL', 'Citigroup', 28],
+  GS: ['usL', 'Goldman Sachs', 27],
+  MS: ['usL', 'Morgan Stanley', 27],
+  SCHW: ['usL', 'Charles Schwab', 28],
+  USB: ['usL', 'US Bancorp', 25],
+  PNC: ['usL', 'PNC Financial', 25],
+  TFC: ['usL', 'Truist', 26],
+  COF: ['usL', 'Capital One', 30],
+  AXP: ['usL', 'American Express', 25],
+  V: ['usL', 'Visa', 22],
+  MA: ['usL', 'Mastercard', 22],
+  BLK: ['usL', 'BlackRock', 24],
+  BX: ['usL', 'Blackstone', 32],
+  KKR: ['usL', 'KKR', 32],
+  APO: ['usL', 'Apollo Global', 32],
+  ARES: ['usL', 'Ares Management', 30],
+  SPGI: ['usL', 'S&P Global', 22],
+  MCO: ['usL', 'Moodys', 24],
+  MSCI: ['usL', 'MSCI Inc', 26],
+  ICE: ['usL', 'Intercontinental Exch', 20],
+  CME: ['usL', 'CME Group', 20],
+  NDAQ: ['usL', 'Nasdaq Inc', 22],
+  CBOE: ['usL', 'Cboe Global', 20],
+  AIG: ['usL', 'AIG', 24],
+  MET: ['usL', 'MetLife', 24],
+  PRU: ['usL', 'Prudential', 24],
+  AFL: ['usL', 'Aflac', 20],
+  ALL: ['usL', 'Allstate', 20],
+  TRV: ['usL', 'Travelers', 18],
+  PGR: ['usL', 'Progressive', 20],
+  CB: ['usL', 'Chubb', 18],
+  MMC: ['usL', 'Marsh McLennan', 17],
+  AON: ['usL', 'Aon', 18],
+  AJG: ['usL', 'Arthur J Gallagher', 18],
+  BRO: ['usL', 'Brown & Brown', 18],
+  HIG: ['usL', 'Hartford', 20],
+  FI: ['usL', 'Fiserv', 22],
+  FIS: ['usL', 'Fidelity National Info', 26],
+  GPN: ['usL', 'Global Payments', 30],
+  SYF: ['usL', 'Synchrony', 30],
+  DFS: ['usL', 'Discover', 30],
+  ALLY: ['usL', 'Ally Financial', 32],
+  UNH: ['usL', 'UnitedHealth', 26],
+  JNJ: ['usL', 'Johnson & Johnson', 17],
+  LLY: ['usL', 'Eli Lilly', 30],
+  PFE: ['usL', 'Pfizer', 24],
+  MRK: ['usL', 'Merck', 22],
+  ABBV: ['usL', 'AbbVie', 24],
+  BMY: ['usL', 'Bristol-Myers', 22],
+  AMGN: ['usL', 'Amgen', 22],
+  GILD: ['usL', 'Gilead', 22],
+  BIIB: ['usL', 'Biogen', 30],
+  REGN: ['usL', 'Regeneron', 28],
+  VRTX: ['usL', 'Vertex Pharma', 28],
+  MRNA: ['usL', 'Moderna', 48],
+  BNTX: ['usL', 'BioNTech', 45],
+  TMO: ['usL', 'Thermo Fisher', 22],
+  DHR: ['usL', 'Danaher', 22],
+  ABT: ['usL', 'Abbott Labs', 18],
+  MDT: ['usL', 'Medtronic', 18],
+  SYK: ['usL', 'Stryker', 20],
+  BSX: ['usL', 'Boston Scientific', 20],
+  EW: ['usL', 'Edwards Lifesciences', 26],
+  ISRG: ['usL', 'Intuitive Surgical', 28],
+  DXCM: ['usL', 'Dexcom', 38],
+  ZBH: ['usL', 'Zimmer Biomet', 22],
+  BDX: ['usL', 'Becton Dickinson', 17],
+  CI: ['usL', 'Cigna', 22],
+  ELV: ['usL', 'Elevance', 22],
+  HUM: ['usL', 'Humana', 26],
+  CVS: ['usL', 'CVS Health', 24],
+  MCK: ['usL', 'McKesson', 20],
+  CAH: ['usL', 'Cardinal Health', 20],
+  COR: ['usL', 'Cencora', 18],
+  HCA: ['usL', 'HCA Healthcare', 24],
+  ZTS: ['usL', 'Zoetis', 22],
+  IQV: ['usL', 'IQVIA', 24],
+  A: ['usL', 'Agilent', 24],
+  RMD: ['usL', 'ResMed', 26],
+  IDXX: ['usL', 'IDEXX Labs', 28],
+  WST: ['usL', 'West Pharma', 26],
+  ALGN: ['usL', 'Align Tech', 38],
+  WMT: ['usL', 'Walmart', 18],
+  COST: ['usL', 'Costco', 20],
+  TGT: ['usL', 'Target', 26],
+  HD: ['usL', 'Home Depot', 22],
+  LOW: ['usL', 'Lowes', 24],
+  PG: ['usL', 'Procter & Gamble', 16],
+  KO: ['usL', 'Coca-Cola', 16],
+  PEP: ['usL', 'PepsiCo', 16],
+  PM: ['usL', 'Philip Morris', 20],
+  MO: ['usL', 'Altria', 20],
+  CL: ['usL', 'Colgate', 15],
+  KMB: ['usL', 'Kimberly-Clark', 15],
+  GIS: ['usL', 'General Mills', 15],
+  K: ['usL', 'Kellanova', 15],
+  HSY: ['usL', 'Hershey', 18],
+  KHC: ['usL', 'Kraft Heinz', 18],
+  MDLZ: ['usL', 'Mondelez', 16],
+  STZ: ['usL', 'Constellation Brands', 20],
+  'BF.B': ['usL', 'Brown-Forman', 20],
+  TAP: ['usL', 'Molson Coors', 22],
+  KR: ['usL', 'Kroger', 20],
+  SYY: ['usL', 'Sysco', 18],
+  ADM: ['usL', 'Archer-Daniels', 20],
+  TSN: ['usL', 'Tyson Foods', 22],
+  CAG: ['usL', 'Conagra', 16],
+  CPB: ['usL', 'Campbells', 16],
+  CHD: ['usL', 'Church & Dwight', 15],
+  CLX: ['usL', 'Clorox', 17],
+  EL: ['usL', 'Estee Lauder', 30],
+  MCD: ['usL', 'McDonalds', 18],
+  SBUX: ['usL', 'Starbucks', 24],
+  CMG: ['usL', 'Chipotle', 28],
+  YUM: ['usL', 'Yum Brands', 18],
+  QSR: ['usL', 'Restaurant Brands', 20],
+  DPZ: ['usL', 'Dominos', 24],
+  DRI: ['usL', 'Darden', 20],
+  WING: ['usL', 'Wingstop', 35],
+  CAVA: ['usL', 'CAVA Group', 45],
+  NKE: ['usL', 'Nike', 26],
+  LULU: ['usL', 'Lululemon', 32],
+  DECK: ['usL', 'Deckers', 32],
+  ONON: ['usL', 'On Holding', 40],
+  SKX: ['usL', 'Skechers', 28],
+  VFC: ['usL', 'VF Corp', 35],
+  RL: ['usL', 'Ralph Lauren', 26],
+  TPR: ['usL', 'Tapestry', 30],
+  TJX: ['usL', 'TJX Companies', 18],
+  ROST: ['usL', 'Ross Stores', 20],
+  BURL: ['usL', 'Burlington', 30],
+  DG: ['usL', 'Dollar General', 28],
+  DLTR: ['usL', 'Dollar Tree', 30],
+  FIVE: ['usL', 'Five Below', 35],
+  ULTA: ['usL', 'Ulta Beauty', 28],
+  BBY: ['usL', 'Best Buy', 28],
+  DKS: ['usL', 'Dicks Sporting', 28],
+  W: ['usL', 'Wayfair', 50],
+  ETSY: ['usL', 'Etsy', 45],
+  EBAY: ['usL', 'eBay', 26],
+  CHWY: ['usL', 'Chewy', 40],
+  CVNA: ['usL', 'Carvana', 65],
+  KMX: ['usL', 'CarMax', 32],
+  AN: ['usL', 'AutoNation', 28],
+  ORLY: ['usL', 'OReilly Auto', 20],
+  AZO: ['usL', 'AutoZone', 20],
+  AAP: ['usL', 'Advance Auto', 32],
+  GPC: ['usL', 'Genuine Parts', 18],
+  F: ['usL', 'Ford', 32],
+  GM: ['usL', 'General Motors', 30],
+  RIVN: ['usL', 'Rivian', 60],
+  LCID: ['usL', 'Lucid', 65],
+  NKLA: ['usL', 'Nikola', 80],
+  MAR: ['usL', 'Marriott', 24],
+  HLT: ['usL', 'Hilton', 24],
+  H: ['usL', 'Hyatt', 26],
+  RCL: ['usL', 'Royal Caribbean', 40],
+  CCL: ['usL', 'Carnival', 45],
+  NCLH: ['usL', 'Norwegian Cruise', 45],
+  LVS: ['usL', 'Las Vegas Sands', 30],
+  WYNN: ['usL', 'Wynn Resorts', 32],
+  MGM: ['usL', 'MGM Resorts', 30],
+  CZR: ['usL', 'Caesars', 40],
+  DKNG: ['usL', 'DraftKings', 45],
+  PENN: ['usL', 'PENN Entertainment', 45],
+  DAL: ['usL', 'Delta Air Lines', 35],
+  UAL: ['usL', 'United Airlines', 38],
+  AAL: ['usL', 'American Airlines', 42],
+  LUV: ['usL', 'Southwest', 30],
+  ALK: ['usL', 'Alaska Air', 35],
+  BKNG: ['usL', 'Booking Holdings', 26],
+  EXPE: ['usL', 'Expedia', 32],
+  TRIP: ['usL', 'TripAdvisor', 38],
+  CAT: ['usL', 'Caterpillar', 24],
+  DE: ['usL', 'Deere', 24],
+  HON: ['usL', 'Honeywell', 18],
+  GE: ['usL', 'GE Aerospace', 24],
+  MMM: ['usL', '3M', 20],
+  EMR: ['usL', 'Emerson', 20],
+  ETN: ['usL', 'Eaton', 24],
+  PH: ['usL', 'Parker Hannifin', 24],
+  ITW: ['usL', 'Illinois Tool Works', 18],
+  CMI: ['usL', 'Cummins', 24],
+  PCAR: ['usL', 'PACCAR', 24],
+  LMT: ['usL', 'Lockheed Martin', 18],
+  RTX: ['usL', 'RTX Corp', 20],
+  NOC: ['usL', 'Northrop Grumman', 18],
+  GD: ['usL', 'General Dynamics', 17],
+  BA: ['usL', 'Boeing', 35],
+  LHX: ['usL', 'L3Harris', 18],
+  HII: ['usL', 'Huntington Ingalls', 20],
+  TDG: ['usL', 'TransDigm', 24],
+  HWM: ['usL', 'Howmet', 26],
+  AXON: ['usL', 'Axon', 38],
+  UPS: ['usL', 'UPS', 22],
+  FDX: ['usL', 'FedEx', 26],
+  UNP: ['usL', 'Union Pacific', 20],
+  CSX: ['usL', 'CSX', 20],
+  NSC: ['usL', 'Norfolk Southern', 22],
+  ODFL: ['usL', 'Old Dominion', 26],
+  JBHT: ['usL', 'JB Hunt', 24],
+  CHRW: ['usL', 'CH Robinson', 24],
+  WM: ['usL', 'Waste Management', 15],
+  RSG: ['usL', 'Republic Services', 15],
+  URI: ['usL', 'United Rentals', 30],
+  FAST: ['usL', 'Fastenal', 20],
+  GWW: ['usL', 'Grainger', 20],
+  PWR: ['usL', 'Quanta Services', 26],
+  J: ['usL', 'Jacobs', 20],
+  EME: ['usL', 'EMCOR', 26],
+  XOM: ['usL', 'Exxon Mobil', 26],
+  CVX: ['usL', 'Chevron', 25],
+  COP: ['usL', 'ConocoPhillips', 28],
+  EOG: ['usL', 'EOG Resources', 30],
+  SLB: ['usL', 'Schlumberger', 32],
+  HAL: ['usL', 'Halliburton', 34],
+  BKR: ['usL', 'Baker Hughes', 30],
+  OXY: ['usL', 'Occidental', 34],
+  PSX: ['usL', 'Phillips 66', 28],
+  VLO: ['usL', 'Valero', 30],
+  MPC: ['usL', 'Marathon Petroleum', 30],
+  PXD: ['usL', 'Pioneer Natural', 30],
+  DVN: ['usL', 'Devon Energy', 34],
+  FANG: ['usL', 'Diamondback', 32],
+  HES: ['usL', 'Hess', 30],
+  KMI: ['usL', 'Kinder Morgan', 20, 7.4],
+  WMB: ['usL', 'Williams Companies', 20, 7.4],
+  OKE: ['usL', 'ONEOK', 22, 7.4],
+  ET: ['usL', 'Energy Transfer', 22, 7.6],
+  EPD: ['usL', 'Enterprise Products', 18, 7.5],
+  LNG: ['usL', 'Cheniere', 28],
+  TRGP: ['usL', 'Targa Resources', 28],
+  FSLR: ['usL', 'First Solar', 40],
+  ENPH: ['usL', 'Enphase', 50],
+  SEDG: ['usL', 'SolarEdge', 55],
+  RUN: ['usL', 'Sunrun', 55],
+  PLUG: ['usL', 'Plug Power', 65],
+  BE: ['usL', 'Bloom Energy', 50],
+  LIN: ['usL', 'Linde', 17],
+  APD: ['usL', 'Air Products', 18],
+  SHW: ['usL', 'Sherwin-Williams', 20],
+  ECL: ['usL', 'Ecolab', 18],
+  DD: ['usL', 'DuPont', 22],
+  DOW: ['usL', 'Dow Inc', 24],
+  LYB: ['usL', 'LyondellBasell', 24],
+  PPG: ['usL', 'PPG Industries', 20],
+  FCX: ['usL', 'Freeport-McMoRan', 36],
+  NEM: ['usL', 'Newmont', 30],
+  NUE: ['usL', 'Nucor', 30],
+  STLD: ['usL', 'Steel Dynamics', 30],
+  CLF: ['usL', 'Cleveland-Cliffs', 42],
+  X: ['usL', 'US Steel', 40],
+  AA: ['usL', 'Alcoa', 42],
+  MP: ['usL', 'MP Materials', 45],
+  ALB: ['usL', 'Albemarle', 42],
+  NEE: ['usL', 'NextEra', 20],
+  SO: ['usL', 'Southern Co', 15],
+  DUK: ['usL', 'Duke Energy', 15],
+  D: ['usL', 'Dominion', 17],
+  AEP: ['usL', 'American Electric', 15],
+  EXC: ['usL', 'Exelon', 16],
+  XEL: ['usL', 'Xcel', 16],
+  SRE: ['usL', 'Sempra', 17],
+  ED: ['usL', 'Con Edison', 14],
+  WEC: ['usL', 'WEC Energy', 15],
+  ES: ['usL', 'Eversource', 17],
+  PEG: ['usL', 'PSEG', 16],
+  PCG: ['usL', 'PG&E', 24],
+  EIX: ['usL', 'Edison Intl', 20],
+  FE: ['usL', 'FirstEnergy', 16],
+  PPL: ['usL', 'PPL Corp', 16],
+  CEG: ['usL', 'Constellation Energy', 30],
+  VST: ['usL', 'Vistra', 35],
+  NRG: ['usL', 'NRG Energy', 30],
+  AES: ['usL', 'AES Corp', 26],
+  O: ['reit', 'Realty Income', 22],
+  PLD: ['reit', 'Prologis', 24],
+  AMT: ['reit', 'American Tower', 24],
+  CCI: ['reit', 'Crown Castle', 24],
+  EQIX: ['reit', 'Equinix', 24],
+  DLR: ['reit', 'Digital Realty', 26],
+  SPG: ['reit', 'Simon Property', 26],
+  PSA: ['reit', 'Public Storage', 20],
+  EXR: ['reit', 'Extra Space', 22],
+  AVB: ['reit', 'AvalonBay', 20],
+  EQR: ['reit', 'Equity Residential', 20],
+  MAA: ['reit', 'Mid-America Apt', 20],
+  INVH: ['reit', 'Invitation Homes', 20],
+  VICI: ['reit', 'VICI Properties', 20],
+  WELL: ['reit', 'Welltower', 20],
+  VTR: ['reit', 'Ventas', 22],
+  ARE: ['reit', 'Alexandria RE', 24],
+  BXP: ['reit', 'BXP Inc', 26],
+  IRM: ['reit', 'Iron Mountain', 22],
+  WPC: ['reit', 'WP Carey', 20],
+  NNN: ['reit', 'NNN REIT', 20],
+  STAG: ['reit', 'STAG Industrial', 22],
+  AGNC: ['reit', 'AGNC Investment', 24, 7.5],
+  NLY: ['reit', 'Annaly Capital', 24, 7.5],
+  GEV: ['usL', 'GE Vernova', 35],
+  CARR: ['usL', 'Carrier', 24],
+  OTIS: ['usL', 'Otis', 18],
+  JCI: ['usL', 'Johnson Controls', 22],
+  TT: ['usL', 'Trane', 22],
+  LEN: ['usL', 'Lennar', 30],
+  DHI: ['usL', 'DR Horton', 30],
+  PHM: ['usL', 'PulteGroup', 30],
+  NVR: ['usL', 'NVR Inc', 26],
+  TOL: ['usL', 'Toll Brothers', 32],
+  BLDR: ['usL', 'Builders FirstSource', 35],
+  POOL: ['usL', 'Pool Corp', 26],
+  BABA: ['intl', 'Alibaba', 38],
+  JD: ['intl', 'JD.com', 40],
+  PDD: ['intl', 'PDD Holdings', 45],
+  BIDU: ['intl', 'Baidu', 38],
+  TCEHY: ['intl', 'Tencent', 32],
+  NTES: ['intl', 'NetEase', 32],
+  NIO: ['intl', 'NIO', 55],
+  XPEV: ['intl', 'XPeng', 55],
+  LI: ['intl', 'Li Auto', 48],
+  BYDDY: ['intl', 'BYD Company', 35],
+  GRAB: ['intl', 'Grab Holdings', 40],
+  SE: ['intl', 'Sea Limited', 45],
+  TM: ['intl', 'Toyota', 20],
+  HMC: ['intl', 'Honda', 22],
+  SONY: ['intl', 'Sony', 24],
+  MUFG: ['intl', 'Mitsubishi UFJ', 24],
+  SMFG: ['intl', 'Sumitomo Mitsui', 24],
+  NVO: ['intl', 'Novo Nordisk', 26],
+  AZN: ['intl', 'AstraZeneca', 20],
+  NVS: ['intl', 'Novartis', 17],
+  GSK: ['intl', 'GSK', 18],
+  SNY: ['intl', 'Sanofi', 18],
+  SAP: ['intl', 'SAP', 24],
+  SHEL: ['intl', 'Shell', 22],
+  BP: ['intl', 'BP', 24],
+  TTE: ['intl', 'TotalEnergies', 22],
+  E: ['intl', 'Eni', 22],
+  EQNR: ['intl', 'Equinor', 26],
+  RIO: ['intl', 'Rio Tinto', 26],
+  BHP: ['intl', 'BHP Group', 26],
+  VALE: ['intl', 'Vale', 32],
+  SCCO: ['intl', 'Southern Copper', 32],
+  PBR: ['intl', 'Petrobras', 38],
+  UL: ['intl', 'Unilever', 15],
+  DEO: ['intl', 'Diageo', 18],
+  BUD: ['intl', 'AB InBev', 20],
+  NSRGY: ['intl', 'Nestle', 14],
+  HSBC: ['intl', 'HSBC', 22],
+  UBS: ['intl', 'UBS Group', 24],
+  DB: ['intl', 'Deutsche Bank', 30],
+  BCS: ['intl', 'Barclays', 28],
+  SAN: ['intl', 'Banco Santander', 26],
+  ING: ['intl', 'ING Group', 26],
+  MELI: ['intl', 'MercadoLibre', 38],
+  QUS: ['usL', 'SPDR MSCI USA StrategicFactors', 14.5],
+  QEFA: ['intl', 'SPDR MSCI EAFE StrategicFactors', 15],
+  QEMM: ['em', 'SPDR MSCI EM StrategicFactors', 19],
+  QWLD: ['usL', 'SPDR MSCI World StrategicFactors', 14.5],
+  VFMF: ['usL', 'Vanguard US Multifactor', 16],
+  VFMO: ['usL', 'Vanguard US Momentum', 18],
+  VFVA: ['usL', 'Vanguard US Value Factor', 16],
+  VFQY: ['usL', 'Vanguard US Quality', 15.5],
+  AVEM: ['em', 'Avantis Emerging Markets'],
+  AVDE: ['intl', 'Avantis Intl Equity'],
+  AVDV: ['intl', 'Avantis Intl Small Value', 18.5],
+  AVES: ['em', 'Avantis EM Value', 20],
+  AVLV: ['usL', 'Avantis US Large Value', 14.5],
+  AVSC: ['usS', 'Avantis US Small Cap'],
+  AVIG: ['bond', 'Avantis Core Fixed Income', 5.5],
+  AVGE: ['usL', 'Avantis All Equity Markets', 15],
+  DFAT: ['usS', 'Dimensional US Targeted Value', 19],
+  DFSV: ['usS', 'Dimensional US Small Value', 19.5],
+  DFAI: ['intl', 'Dimensional Intl Core'],
+  DFAX: ['intl', 'Dimensional World ex-US'],
+  DFAE: ['em', 'Dimensional EM Core'],
+  DFIV: ['intl', 'Dimensional Intl Value', 15.5],
+  DFUV: ['usL', 'Dimensional US Marketwide Value', 14.5],
+  DEUS: ['usL', 'Xtrackers Russell US Multifactor', 15.5],
+  DEEF: ['intl', 'Xtrackers Developed ex-US Multifactor', 15.5],
+  DBEF: ['intl', 'Xtrackers Hedged MSCI EAFE', 12.5],
+  DBEU: ['intl', 'Xtrackers Hedged Europe', 13.5],
+  GSLC: ['usL', 'Goldman ActiveBeta US Large', 14.5],
+  GSIE: ['intl', 'Goldman ActiveBeta Intl', 15],
+  JQUA: ['usL', 'JPMorgan US Quality Factor', 14.5],
+  JVAL: ['usL', 'JPMorgan US Value Factor', 15.5],
+  JMOM: ['usL', 'JPMorgan US Momentum Factor', 17],
+  JPUS: ['usL', 'JPMorgan Diversified US', 14.5],
+  JPIN: ['intl', 'JPMorgan Diversified Intl', 15],
+  LRGF: ['usL', 'iShares US Multifactor', 15.5],
+  INTF: ['intl', 'iShares Intl Multifactor', 15.5],
+  SMLF: ['usS', 'iShares Small Multifactor', 18.5],
+  IQLT: ['intl', 'iShares Intl Quality', 15],
+  IMTM: ['intl', 'iShares Intl Momentum', 16],
+  IVLU: ['intl', 'iShares Intl Value', 15.5],
+  ACWV: ['usL', 'iShares Global Min Vol', 11.5],
+  EFAV: ['intl', 'iShares EAFE Min Vol', 12.5],
+  EEMV: ['em', 'iShares EM Min Vol', 15.5],
+  OMFL: ['usL', 'Invesco Russell Dynamic Multifactor', 15.5],
+  XLG: ['usL', 'Invesco S&P 500 Top 50', 16],
+  FNDB: ['usL', 'Schwab Fundamental US Broad', 15],
+  FNDA: ['usS', 'Schwab Fundamental Small', 18.5],
+  FNDF: ['intl', 'Schwab Fundamental Intl', 15.5],
+  FNDE: ['em', 'Schwab Fundamental EM', 19],
+  SCHK: ['usL', 'Schwab 1000 ETF'],
+  ESGU: ['usL', 'iShares ESG Aware USA'],
+  ESGV: ['usL', 'Vanguard ESG US Stock'],
+  VSGX: ['intl', 'Vanguard ESG Intl Stock'],
+  SPHB: ['usL', 'Invesco S&P 500 High Beta', 24],
+  SPTS: ['tsy', 'SPDR Short Treasury', 2],
+  SPTI: ['tsy', 'SPDR Interm Treasury', 5],
+  SPBO: ['bond', 'SPDR Corporate Bond', 7],
+  SPSB: ['bond', 'SPDR Short Corporate', 3],
+  SPMB: ['bond', 'SPDR Mortgage-Backed', 4.5],
+  JCPB: ['bond', 'JPMorgan Core Plus Bond', 6],
+  FIXD: ['bond', 'First Trust TCW Core', 6],
+  BINC: ['bond', 'BlackRock Flexible Income', 5.5],
+  EAGG: ['bond', 'iShares ESG Aggregate', 5.5]
 };
 const SINGLE_STOCK_VOL = 15.6;   // holdings with a vol override above this behave as concentrated positions in the correlation math
+/* Normalized lookup: BRK.B, BRK-B, brk b and BRKB all resolve to the same entry. */
+let TICKERS_NORM = null;
+const tkNorm = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+function tickerLookup(tk) {
+  if (!TICKERS_NORM) { TICKERS_NORM = {}; Object.keys(TICKERS).forEach(k => TICKERS_NORM[tkNorm(k)] = TICKERS[k]); }
+  return TICKERS_NORM[tkNorm(tk)] || null;
+}
 function resolveHolding(h) {
   const tk = String(h.ticker || '').trim().toUpperCase();
-  const lib = TICKERS[tk];
+  const lib = tickerLookup(tk);
   const cls = h.cls || (lib ? lib[0] : 'custom');
   const base = ASSET_CLASSES[cls] || ASSET_CLASSES.custom;
   const ret = h.ret != null && h.ret !== '' ? +h.ret : (lib && lib[3] != null ? lib[3] : base.ret);
@@ -763,6 +1884,40 @@ function portfolioStats(holdings) {
   rs.forEach(r => byClass[r.cls] = (byClass[r.cls] || 0) + r.w);
   const unknown = rs.filter(r => !r.known && !r.cls).map(r => r.ticker);
   return { mean: mean / 100, vol: Math.sqrt(variance), holdings: rs, totW, byClass, unknown };
+}
+/* Retirement-income Monte Carlo — draw an (inflation-adjusted) withdrawal from the portfolio each year. */
+function withdrawMC(start, years, wd0, infl, mean, vol, trials) {
+  trials = trials || 1200; years = Math.max(1, Math.round(years));
+  const paths = [], deplYears = []; let successes = 0;
+  for (let i = 0; i < trials; i++) {
+    let b = start, gone = null; const p = [b];
+    for (let y = 0; y < years; y++) {
+      const wd = wd0 * pow(1 + infl, y);
+      b = b * (1 + Math.max(-0.6, randNormal(mean, vol))) - wd;
+      if (b <= 0) { b = 0; if (gone == null) gone = y + 1; }
+      p.push(b);
+    }
+    if (gone == null) { successes++; deplYears.push(years + 1); } else deplYears.push(gone);
+    paths.push(p);
+  }
+  const idx = pPct => Math.min(trials - 1, Math.floor(trials * pPct));
+  const bandAt = pPct => { const out = []; for (let y = 0; y <= years; y++) { const col = paths.map(p => p[y]).sort((a, b) => a - b); out.push(col[idx(pPct)]); } return out; };
+  const endings = paths.map(p => p[years]).sort((a, b) => a - b);
+  deplYears.sort((a, b) => a - b);
+  return { trials, years, success: successes / trials,
+    p10: bandAt(.10), p50: bandAt(.50), p90: bandAt(.90),
+    endP10: endings[idx(.10)], endP50: endings[idx(.50)], endP90: endings[idx(.90)],
+    lastYearsP10: deplYears[idx(.10)] };
+}
+/* Sustainable withdrawal at a confidence level — bisect the first-year draw until success ≈ conf. */
+function swrAt(start, years, infl, mean, vol, conf) {
+  if (!(start > 0)) return 0;
+  conf = conf || 0.9;
+  const ok = wd => withdrawMC(start, years, wd, infl, mean, vol, 500).success >= conf;
+  let lo = 0, hi = start * 0.12;
+  if (!ok(lo + start * 0.001)) return 0;
+  for (let i = 0; i < 11; i++) { const mid = (lo + hi) / 2; if (ok(mid)) lo = mid; else hi = mid; }
+  return lo;
 }
 /* Standalone accumulation Monte Carlo — grow a lump sum (plus annual additions) under the portfolio. */
 function growthMC(start, years, annual, mean, vol, trials) {
@@ -796,7 +1951,16 @@ function plRunNow() {
     const stats = portfolioStats((pf || {}).holdings);
     if (!stats) return null;
     const res = { stats };
-    if ((st.mode || 'plan') === 'plan') res.mc = monteCarlo(STATE, +st.trials || 800, { mean: stats.mean, vol: stats.vol });
+    const mode = st.mode || 'plan';
+    if (mode === 'plan') res.mc = monteCarlo(STATE, +st.trials || 800, { mean: stats.mean, vol: stats.vol });
+    else if (mode === 'withdraw') {
+      const start = +st.start || RESULTS.investable || 1000000;
+      const infl = st.inflateWd === false ? 0 : (+STATE.assumptions.inflation || 0) / 100;
+      const wd0 = (st.wdType || 'pct') === 'pct' ? start * (+st.wdPct || 0) / 100 : (+st.wdAmount || 0);
+      res.w = withdrawMC(start, +st.years || 30, wd0, infl, stats.mean, stats.vol, +st.trials || 1200);
+      res.w.start = start; res.w.wd0 = wd0;
+      res.swr = swrAt(start, +st.years || 30, infl, stats.mean, stats.vol, 0.9);
+    }
     else res.g = growthMC(+st.start || RESULTS.investable || 100000, +st.years || 30, +st.annual || 0, stats.mean, stats.vol, 1500);
     return res;
   };
@@ -2657,53 +3821,122 @@ function liveIntake() {
     { sub: 'Live' });
 }
 /* ----------------------------- PORTFOLIO LAB (UI) ------------------------- */
+let PL_TAB = 'current';                                                 // which holdings editor is open
 function plHoldingRow(pf, h, i) {
   const r = resolveHolding(h);
   const clsOpts = Object.keys(ASSET_CLASSES).map(k => `<option value="${k}" ${(h.cls || r.cls) === k ? 'selected' : ''}>${ASSET_CLASSES[k].label}</option>`).join('');
-  const nameTxt = r.known ? r.name : (r.ticker ? 'Unknown ticker — pick an asset class' : 'Type a ticker (SPY, VTI, AAPL…)');
-  return `<div class="repeat-row" style="grid-template-columns:110px 92px 1fr 24px;align-items:end">
-    <div class="rr-cell"><label>Ticker</label><input type="text" style="text-transform:uppercase" data-pf="${pf}" data-hidx="${i}" data-hkey="ticker" value="${escapeAttr(h.ticker || '')}" placeholder="SPY"></div>
-    <div class="rr-cell"><label>Weight</label><div class="control has-suffix"><input type="number" step="1" min="0" max="100" data-pf="${pf}" data-hidx="${i}" data-hkey="weight" data-vtype="percent" value="${h.weight != null && h.weight !== '' ? h.weight : ''}"><span class="suffix">%</span></div></div>
-    <div class="rr-cell"><label>Fund / asset class</label><div class="annual-echo" style="margin:.1rem 0 .25rem" data-pl-name="${pf}-${i}">${escapeHtml(nameTxt)}</div></div>
+  const nameTxt = r.known ? r.name : (r.ticker ? 'Unknown — pick a class' : '');
+  return `<div class="pl-row">
+    <input type="text" style="text-transform:uppercase" list="tickerList" data-pf="${pf}" data-hidx="${i}" data-hkey="ticker" value="${escapeAttr(h.ticker || '')}" placeholder="Ticker" autocomplete="off">
+    <div class="pl-name" data-pl-name="${pf}-${i}">${escapeHtml(nameTxt)}</div>
+    <select data-pf="${pf}" data-hidx="${i}" data-hkey="cls" data-vtype="text">${clsOpts}</select>
+    <div class="control has-suffix"><input type="number" step="0.1" min="0" max="100" data-pf="${pf}" data-hidx="${i}" data-hkey="weight" data-vtype="percent" value="${h.weight != null && h.weight !== '' ? h.weight : ''}" placeholder="0"><span class="suffix">%</span></div>
+    <div class="control has-suffix"><input type="number" step="0.1" data-pf="${pf}" data-hidx="${i}" data-hkey="ret" data-vtype="percent" value="${h.ret != null && h.ret !== '' ? h.ret : ''}" placeholder="${r.ret}"><span class="suffix">%</span></div>
+    <div class="control has-suffix"><input type="number" step="0.5" min="0" data-pf="${pf}" data-hidx="${i}" data-hkey="vol" data-vtype="percent" value="${h.vol != null && h.vol !== '' ? h.vol : ''}" placeholder="${r.vol}"><span class="suffix">%</span></div>
     <button class="rr-del" data-action="pl-del" data-pf="${pf}" data-idx="${i}" title="Remove">×</button>
-    <div class="rr-grid" style="grid-column:1/-1">
-      <div class="rr-cell"><label>Asset class</label><select data-pf="${pf}" data-hidx="${i}" data-hkey="cls" data-vtype="text">${clsOpts}</select></div>
-      <div class="rr-cell"><label>Exp. return</label><div class="control has-suffix"><input type="number" step="0.1" data-pf="${pf}" data-hidx="${i}" data-hkey="ret" data-vtype="percent" value="${h.ret != null && h.ret !== '' ? h.ret : ''}" placeholder="${r.ret}"><span class="suffix">%</span></div></div>
-      <div class="rr-cell"><label>Volatility</label><div class="control has-suffix"><input type="number" step="0.5" min="0" data-pf="${pf}" data-hidx="${i}" data-hkey="vol" data-vtype="percent" value="${h.vol != null && h.vol !== '' ? h.vol : ''}" placeholder="${r.vol}"><span class="suffix">%</span></div></div>
-    </div></div>`;
+  </div>`;
 }
 function plEditor(pf) {
-  const P = STATE.portfolios[pf], stats = portfolioStats(P.holdings);
+  const P = STATE.portfolios[pf];
   const totW = (P.holdings || []).reduce((s, h) => s + (+h.weight || 0), 0);
-  const totBadge = Math.abs(totW - 100) < 0.01 ? badge('100%', 'good') : badge(totW.toFixed(0) + '%', 'warn');
-  return panel(pf === 'current' ? 'Current Portfolio' : 'Proposed Portfolio',
-    `${field({ path: `portfolios.${pf}.name`, label: 'Label on charts & report', type: 'text' })}
-     <div id="plList-${pf}">${(P.holdings || []).map((h, i) => plHoldingRow(pf, h, i)).join('')}</div>
-     <div class="btn-row" style="align-items:center">
-       <button class="add-row" data-action="pl-add" data-pf="${pf}">＋ Add holding</button>
-       <span style="margin-left:auto;font-size:.74rem;color:var(--muted)">Weights: ${totBadge}</span>
-       <button class="btn sm" data-action="pl-normalize" data-pf="${pf}">Normalize to 100%</button>
-     </div>
-     ${stats ? `<p class="budget-note" style="margin-top:.4rem">Expected return <b>${pct(stats.mean * 100, 1)}</b> · volatility <b>${pct(stats.vol * 100, 1)}</b> — from the editable assumptions above.</p>` : ''}`,
-    { sub: pf === 'current' ? 'What he owns today' : 'Where you want him' });
+  const stats = portfolioStats(P.holdings);
+  const totBadge = Math.abs(totW - 100) < 0.05 ? badge(totW.toFixed(0) + '%', 'good') : badge(totW.toFixed(1) + '%', 'warn');
+  return `<div class="panel">
+    <div class="panel-head" style="flex-wrap:wrap;gap:.7rem">
+      <div style="display:flex;align-items:center;gap:.7rem;flex:1;min-width:260px">
+        <h3 style="white-space:nowrap">${pf === 'current' ? 'Current Holdings' : 'Proposed Holdings'}</h3>
+        <input type="text" data-path="portfolios.${pf}.name" data-vtype="text" value="${escapeAttr(P.name || '')}" style="max-width:260px" title="Label on charts & report">
+      </div>
+      <div class="btn-row" style="align-items:center">
+        <span style="font-size:.74rem;color:var(--muted)">Total ${totBadge}</span>
+        <button class="btn sm" data-action="pl-normalize" data-pf="${pf}">Normalize to 100%</button>
+        <button class="btn sm" data-action="pl-paste-toggle" data-pf="${pf}">📋 Paste from statement</button>
+      </div>
+    </div>
+    <div class="panel-body" style="padding-top: .9rem">
+      <div class="pl-paste" id="plPaste-${pf}" hidden>
+        <textarea id="plPasteText-${pf}" rows="6" placeholder="Paste holdings straight from a statement or proposal — one per line, e.g.&#10;SPDR MSCI USA StrategicFactors ETF (QUS)   12.40%&#10;Vanguard Total World Bond ETF (BNDW)   9.00&#10;AAPL 5"></textarea>
+        <div class="btn-row" style="margin-top:.5rem">
+          <button class="btn gold sm" data-action="pl-paste-import" data-pf="${pf}">Import — replaces this list</button>
+          <button class="btn ghost sm" data-action="pl-paste-toggle" data-pf="${pf}">Cancel</button>
+          <span style="font-size:.72rem;color:var(--muted);align-self:center">Reads the (TICKER) and the trailing % on each line.</span>
+        </div>
+      </div>
+      <div class="pl-colhead"><span>Ticker</span><span>Fund / security</span><span>Asset class</span><span>Weight</span><span>Exp. ret</span><span>Volatility</span><span></span></div>
+      <div id="plList-${pf}">${(P.holdings || []).map((h, i) => plHoldingRow(pf, h, i)).join('')}</div>
+      <div class="btn-row" style="align-items:center;margin-top:.4rem">
+        <button class="add-row" data-action="pl-add" data-pf="${pf}">＋ Add holding</button>
+        ${stats ? `<span style="margin-left:auto;font-size:.76rem;color:var(--muted)">Portfolio: expected <b>${pct(stats.mean * 100, 1)}</b> · volatility <b>±${pct(stats.vol * 100, 1)}</b></span>` : ''}
+      </div>
+    </div></div>`;
+}
+function ensureTickerDatalist() {                                       // one shared autocomplete list for every ticker input
+  if ($('#tickerList')) return;
+  const dl = document.createElement('datalist'); dl.id = 'tickerList';
+  dl.innerHTML = Object.keys(TICKERS).map(k => `<option value="${escapeAttr(k)}" label="${escapeAttr(TICKERS[k][1])}"></option>`).join('');
+  document.body.appendChild(dl);
+}
+/* Parse "Fund Name (TICKER)  12.40%" statement lines — also accepts "TICKER 12.4". */
+function plParsePaste(text) {
+  const out = [];
+  String(text || '').split(/\r?\n+/).forEach(line => {
+    line = line.trim(); if (!line) return;
+    let tk = null;
+    const par = line.match(/\(([A-Za-z0-9.\-]{1,7})\)/);
+    if (par) tk = par[1];
+    if (!tk) { const first = line.split(/[\s,\t]+/)[0]; if (/^[A-Za-z][A-Za-z0-9.\-]{0,6}$/.test(first)) tk = first; }
+    if (!tk) return;
+    const tail = line.replace(/\([^)]*\)/g, '').match(/(\d+(?:\.\d+)?)\s*%?\s*$/);
+    out.push({ id: uid(), ticker: tk.toUpperCase(), weight: tail ? parseFloat(tail[1]) : 0 });
+  });
+  return out;
 }
 function buildPortfolioLab() {
-  const st = STATE.portfolios.settings, planMode = (st.mode || 'plan') === 'plan';
-  const settings = panel('Analysis Settings', `
-    <div class="block-head"><span class="block-title">Test each portfolio</span>${modeSeg('pl-mode', planMode ? 'plan' : 'growth', [['plan', 'Through the plan'], ['growth', 'Grow a lump sum']])}</div>
-    <p class="budget-note">${planMode
-      ? '<b>Through the plan</b> runs the client’s entire financial plan — spending, Social Security, pension, taxes, RMDs, events — with each portfolio’s return and risk. Success = the money lasts to life expectancy.'
-      : '<b>Grow a lump sum</b> compounds a starting amount under each portfolio — no plan cash flows — and shows the range of outcomes.'}</p>
-    ${planMode
-      ? field({ path: 'portfolios.settings.trials', label: 'Simulations per portfolio', type: 'select', options: [{ value: 400, label: '400 — fast' }, { value: 800, label: '800 — standard' }, { value: 1500, label: '1,500 — fine' }] })
-      : fieldRow({ path: 'portfolios.settings.start', label: 'Starting amount', type: 'currency', ph: String(RESULTS.investable || 100000) }, { path: 'portfolios.settings.annual', label: 'Added each year', type: 'currency' }) +
-        field({ path: 'portfolios.settings.years', label: 'Years to grow', type: 'number', min: 1, max: 60 })}`,
-    { sub: 'Monte Carlo' });
+  ensureTickerDatalist();
+  const st = STATE.portfolios.settings, mode = st.mode || 'plan';
+  const investable = RESULTS.investable || 0;
+  const modeNote = {
+    plan: '<b>Through the plan</b> runs the client’s entire financial plan — spending, Social Security, pension, taxes, RMDs, events — under each portfolio’s return and risk. Success = the money lasts to life expectancy.',
+    withdraw: '<b>Retirement withdrawals</b> draws an income from the portfolio each year (inflation-adjusted) with no other cash flows — the classic income stress test, plus the sustainable draw at 90% confidence.',
+    growth: '<b>Grow a lump sum</b> compounds a starting amount under each portfolio — no withdrawals — and shows the range of outcomes.'
+  }[mode];
+  let modeFields = '';
+  if (mode === 'plan') modeFields = `<div class="grid cols-4">${field({ path: 'portfolios.settings.trials', label: 'Simulations per portfolio', type: 'select', options: [{ value: 400, label: '400 — fast' }, { value: 800, label: '800 — standard' }, { value: 1500, label: '1,500 — fine' }] })}</div>`;
+  else if (mode === 'withdraw') {
+    const wdPctMode = (st.wdType || 'pct') === 'pct';
+    modeFields = `<div class="grid cols-4">
+      ${field({ path: 'portfolios.settings.start', label: 'Starting portfolio', type: 'currency', ph: investable ? String(investable) : '1,000,000' })}
+      <div class="field"><label>Withdrawal ${modeSeg('pl-wdtype', wdPctMode ? 'pct' : 'dollar', [['pct', '% of start'], ['dollar', '$ / year']])}</label>
+        ${wdPctMode
+          ? `<div class="control has-suffix"><input type="number" step="0.1" min="0" max="20" data-path="portfolios.settings.wdPct" data-vtype="percent" value="${st.wdPct != null ? st.wdPct : 4}"><span class="suffix">% / yr</span></div>`
+          : `<div class="control has-prefix has-suffix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-path="portfolios.settings.wdAmount" data-money value="${moneyDisplay(st.wdAmount || 0)}"><span class="suffix">/yr</span></div>`}
+      </div>
+      ${field({ path: 'portfolios.settings.years', label: 'For how many years', type: 'number', min: 1, max: 60 })}
+      ${field({ path: 'portfolios.settings.trials', label: 'Simulations', type: 'select', options: [{ value: 600, label: '600 — fast' }, { value: 1200, label: '1,200 — standard' }, { value: 2500, label: '2,500 — fine' }] })}
+    </div>
+    ${toggleField('portfolios.settings.inflateWd', 'Increase the withdrawal with inflation each year')}`;
+  } else modeFields = `<div class="grid cols-4">
+      ${field({ path: 'portfolios.settings.start', label: 'Starting amount', type: 'currency', ph: investable ? String(investable) : '100,000' })}
+      ${field({ path: 'portfolios.settings.annual', label: 'Added each year', type: 'currency' })}
+      ${field({ path: 'portfolios.settings.years', label: 'Years to grow', type: 'number', min: 1, max: 60 })}
+    </div>`;
+  const tabBtn = pf => {
+    const P = STATE.portfolios[pf], n = (P.holdings || []).filter(h => (h.ticker || '').trim()).length;
+    return `<button class="pl-tab ${PL_TAB === pf ? 'on' : ''}" data-action="pl-tab" data-pf="${pf}">${pf === 'current' ? 'Current portfolio' : 'Proposed portfolio'} <span class="pl-tab-n">${n}</span></button>`;
+  };
   getViewEl('portfolio').innerHTML = headBlock('Analytics', 'Portfolio Lab',
-    'Enter the tickers he owns and the portfolio you’d put him in — then stress-test both through hundreds of market simulations and compare success rates side by side.', collapseBtn()) +
-    `<div class="split io-split"><div class="advisor-only io-inputs">
-      ${settings}${plEditor('current')}${plEditor('proposed')}
-    </div><div id="res-portfolio"></div></div>`;
+    'Enter the tickers he owns and the portfolio you’d put him in — then stress-test both through hundreds of market simulations and compare outcomes side by side.') +
+    `<div class="advisor-only">
+      <div class="panel pad" style="margin-bottom:1.1rem">
+        <div class="block-head"><span class="block-title">Scenario</span>${modeSeg('pl-mode', mode, [['plan', 'Through the plan'], ['withdraw', 'Retirement withdrawals'], ['growth', 'Grow a lump sum']])}</div>
+        <p class="budget-note">${modeNote}</p>
+        ${modeFields}
+      </div>
+      <div class="pl-tabs">${tabBtn('current')}${tabBtn('proposed')}</div>
+      ${plEditor(PL_TAB)}
+    </div>
+    <div style="height:1.2rem"></div>
+    <div id="res-portfolio"></div>`;
 }
 function plCompareChart(xs, A, B, opts = {}) {
   const W = opts.w || 760, H = opts.h || 260, pad = { l: 56, r: 16, t: 16, b: 28 };
@@ -2731,13 +3964,14 @@ function plAllocBar(stats) {
 }
 function livePortfolioLab() {
   const el = $('#res-portfolio'); if (!el) return;
-  const st = STATE.portfolios.settings, planMode = (st.mode || 'plan') === 'plan';
+  const st = STATE.portfolios.settings, mode = st.mode || 'plan';
   const res = plAsync(() => { if (currentView === 'portfolio') livePortfolioLab(); });
   const curStats = portfolioStats(STATE.portfolios.current.holdings);
   const proStats = portfolioStats(STATE.portfolios.proposed.holdings);
   if (!curStats && !proStats) { el.innerHTML = panel('Results', '<div class="empty">Add holdings with weights to either portfolio to run the analysis.</div>'); return; }
   if (!res) {
-    el.innerHTML = panel('Results', `<div class="empty"><div class="e-ico">◷</div>Running ${planMode ? (+st.trials || 800) + ' full-plan simulations' : '1,500 growth simulations'} per portfolio…</div>`);
+    const runNote = mode === 'plan' ? `${+st.trials || 800} full-plan simulations` : mode === 'withdraw' ? `${+st.trials || 1200} withdrawal simulations + sustainable-draw search` : '1,500 growth simulations';
+    el.innerHTML = panel('Results', `<div class="empty"><div class="e-ico">◷</div>Running ${runNote} per portfolio…</div>`);
     return;
   }
   const A = res.current, B = res.proposed;
@@ -2745,7 +3979,7 @@ function livePortfolioLab() {
     if (!r) return `<div class="panel pad"><div class="empty">No ${label.toLowerCase()} holdings yet.</div></div>`;
     const s = r.stats;
     const head = `<div style="display:flex;align-items:center;gap:.5rem;margin-bottom:.4rem"><span class="dot" style="background:${colorVar};width:11px;height:11px"></span><b style="font-size:1.02rem">${escapeHtml(label)}</b></div>`;
-    if (planMode) {
+    if (mode === 'plan') {
       const pctV = Math.round(r.mc.success * 100), t3 = pctV >= 80 ? 'good' : pctV >= 60 ? 'warn' : 'bad';
       return `<div class="panel pad" style="text-align:center">${head}${gauge(pctV, { size: 170 })}
         <div>${badge(pctV >= 80 ? 'Strong' : pctV >= 60 ? 'On track' : 'At risk', t3)}</div>
@@ -2754,6 +3988,19 @@ function livePortfolioLab() {
           <div class="tl-row"><span>Median ending estate</span><b class="amount">${fmtK(r.mc.endP50)}</b></div>
           <div class="tl-row"><span>Bad markets (10th pct.)</span><b class="amount">${r.mc.endP10 > 0 ? fmtK(r.mc.endP10) : 'lasts to ' + (r.mc.deplP10 > r.mc.lastAge ? r.mc.lastAge + '+' : r.mc.deplP10)}</b></div>
         </div>
+        <div style="margin-top:.6rem">${plAllocBar(s)}</div></div>`;
+    }
+    if (mode === 'withdraw') {
+      const pctV = Math.round(r.w.success * 100), t3 = pctV >= 85 ? 'good' : pctV >= 70 ? 'warn' : 'bad';
+      return `<div class="panel pad" style="text-align:center">${head}${gauge(pctV, { size: 170 })}
+        <div>${badge(pctV >= 85 ? 'Sustainable' : pctV >= 70 ? 'Watch closely' : 'At risk', t3)}</div>
+        <div class="tl-rows" style="text-align:left">
+          <div class="tl-row"><span>Drawing</span><b class="amount">${fmt$(r.w.wd0)}/yr (${pct(r.w.start > 0 ? r.w.wd0 / r.w.start * 100 : 0, 1)})</b></div>
+          <div class="tl-row"><span>Expected return / risk</span><b>${pct(s.mean * 100, 1)} / ±${pct(s.vol * 100, 1)}</b></div>
+          <div class="tl-row"><span>Median ending balance</span><b class="amount">${fmtK(r.w.endP50)}</b></div>
+          <div class="tl-row"><span>Bad markets (10th pct.)</span><b class="amount">${r.w.endP10 > 0 ? fmtK(r.w.endP10) : 'lasts ~' + Math.min(r.w.lastYearsP10, r.w.years) + ' yrs'}</b></div>
+        </div>
+        <p class="i-action" style="text-align:left;margin-top:.5rem">Sustains ≈ <b class="amount">${fmt$(r.swr || 0)}/yr</b> (${pct(r.w.start > 0 ? (r.swr || 0) / r.w.start * 100 : 0, 1)} of the start) at <b>90% confidence</b> over ${r.w.years} years.</p>
         <div style="margin-top:.6rem">${plAllocBar(s)}</div></div>`;
     }
     return `<div class="panel pad">${head}
@@ -2765,21 +4012,25 @@ function livePortfolioLab() {
       </div>
       <div style="margin-top:.6rem">${plAllocBar(s)}</div></div>`;
   };
-  const xs = planMode ? (A ? A.mc.ages : B.mc.ages) : Array.from({ length: (+st.years || 30) + 1 }, (_, i) => i);
-  const chA = A ? (planMode ? A.mc : A.g) : null, chB = B ? (planMode ? B.mc : B.g) : null;
+  const pick = r => r ? (mode === 'plan' ? r.mc : mode === 'withdraw' ? r.w : r.g) : null;
+  const chA = pick(A), chB = pick(B);
+  const xs = mode === 'plan' ? (A ? A.mc.ages : B.mc.ages) : Array.from({ length: (+st.years || 30) + 1 }, (_, i) => i);
   const cmp = (label, a, b, fmt, higherBetter = true) => (a == null || b == null) ? '' : cmpRow(label, a, b, fmt, higherBetter);
   const table = (A && B) ? `<table class="tbl" style="margin-top:1rem"><thead><tr><th style="text-align:left">Metric</th><th>${escapeHtml(STATE.portfolios.current.name || 'Current')}</th><th>${escapeHtml(STATE.portfolios.proposed.name || 'Proposed')}</th><th>Change</th></tr></thead><tbody>
-      ${planMode ? cmp('Probability of success', Math.round(A.mc.success * 100), Math.round(B.mc.success * 100), v => v + '%') : ''}
-      ${planMode ? cmp('Median ending estate', A.mc.endP50, B.mc.endP50, fmt$) : cmp('Median outcome', A.g.endP50, B.g.endP50, fmt$)}
-      ${planMode ? cmp('Bad-market ending (10th)', A.mc.endP10, B.mc.endP10, fmt$) : cmp('10th percentile', A.g.endP10, B.g.endP10, fmt$)}
+      ${mode === 'plan' ? cmp('Probability of success', Math.round(A.mc.success * 100), Math.round(B.mc.success * 100), v => v + '%') : ''}
+      ${mode === 'withdraw' ? cmp('Probability the income lasts', Math.round(A.w.success * 100), Math.round(B.w.success * 100), v => v + '%') : ''}
+      ${mode === 'withdraw' ? cmp('Sustainable draw @90%', Math.round(A.swr || 0), Math.round(B.swr || 0), fmt$) : ''}
+      ${mode === 'plan' ? cmp('Median ending estate', A.mc.endP50, B.mc.endP50, fmt$) : mode === 'withdraw' ? cmp('Median ending balance', A.w.endP50, B.w.endP50, fmt$) : cmp('Median outcome', A.g.endP50, B.g.endP50, fmt$)}
+      ${mode === 'plan' ? cmp('Bad-market ending (10th)', A.mc.endP10, B.mc.endP10, fmt$) : mode === 'withdraw' ? cmp('Bad-market ending (10th)', A.w.endP10, B.w.endP10, fmt$) : cmp('10th percentile', A.g.endP10, B.g.endP10, fmt$)}
       ${cmp('Expected return', +(A.stats.mean * 100).toFixed(1), +(B.stats.mean * 100).toFixed(1), v => pct(v, 1))}
       ${cmp('Volatility (risk)', +(A.stats.vol * 100).toFixed(1), +(B.stats.vol * 100).toFixed(1), v => '±' + pct(v, 1), false)}
     </tbody></table>` : '';
+  const chartTitle = mode === 'plan' ? 'Plan Outcomes Under Each Portfolio' : mode === 'withdraw' ? 'Portfolio Balance While Drawing Income' : 'Growth of the Money';
   el.innerHTML = `
     <div class="grid cols-2" style="margin-bottom:1.1rem;align-items:stretch">${card(STATE.portfolios.current.name || 'Current', A, 'var(--ink)')}${card(STATE.portfolios.proposed.name || 'Proposed', B, 'var(--gold-deep)')}</div>
-    ${panel(planMode ? 'Plan Outcomes Under Each Portfolio' : 'Growth of the Money', plCompareChart(xs, chA, chB, { markers: planMode && !RESULTS.alreadyRetired ? [{ x: RESULTS.retAge, label: 'Retire' }] : [] }) +
+    ${panel(chartTitle, plCompareChart(xs, chA, chB, { markers: mode === 'plan' && !RESULTS.alreadyRetired ? [{ x: RESULTS.retAge, label: 'Retire' }] : [] }) +
       `<div class="legend"><span><i class="dot" style="background:var(--ink)"></i>${escapeHtml(STATE.portfolios.current.name || 'Current')}</span><span><i class="dot" style="background:var(--gold-deep)"></i>${escapeHtml(STATE.portfolios.proposed.name || 'Proposed')}</span><span>Bands: 10th–90th percentile · lines: median</span></div>` + table,
-      { sub: planMode ? `${+st.trials || 800} trials each` : `1,500 trials each`, hideKey: 'pl-results' })}
+      { sub: mode === 'growth' ? '1,500 trials each' : `${+st.trials || (mode === 'withdraw' ? 1200 : 800)} trials each`, hideKey: 'pl-results' })}
     <div class="btn-row advisor-only" style="margin-top:1rem">
       ${A ? `<button class="btn" data-action="pl-apply" data-pf="current">Use Current in plan assumptions</button>` : ''}
       ${B ? `<button class="btn gold" data-action="pl-apply" data-pf="proposed">Use Proposed in plan assumptions</button>` : ''}
@@ -2947,20 +4198,25 @@ function buildReport(opts) {
     <div class="rp-grid two">${rpStat('Protection — Total Need', fmt$(R.totalProtNeed))}${rpStat('Protection — Gap', R.protGap > 0 ? fmt$(R.protGap) : 'Covered')}</div>${rpFoot}</div>`);
   if (opts.portfolio) {
     const P = STATE.portfolios, res = plRunNow();                     // cached when the Lab was just open
-    const planMode = (P.settings.mode || 'plan') === 'plan';
+    const pMode = P.settings.mode || 'plan';
     const one = (label, r) => {
       if (!r) return '';
       const s = r.stats, cls = Object.keys(s.byClass).map(k => `${ASSET_CLASSES[k].label} ${pct(s.byClass[k] * 100, 0)}`).join(' · ');
-      const line = planMode
+      const line = pMode === 'plan'
         ? `Probability of success <b>${Math.round(r.mc.success * 100)}%</b> · median ending estate <b>${fmtK(r.mc.endP50)}</b> · bad markets (10th pct.) ${r.mc.endP10 > 0 ? fmtK(r.mc.endP10) : 'funds to age ' + (r.mc.deplP10 > r.mc.lastAge ? r.mc.lastAge + '+' : r.mc.deplP10)}`
+        : pMode === 'withdraw'
+        ? `Drawing ${fmt$(r.w.wd0)}/yr from ${fmtK(r.w.start)}: income lasts the full ${r.w.years} years in <b>${Math.round(r.w.success * 100)}%</b> of markets · median ending ${fmtK(r.w.endP50)} · sustainable draw at 90% confidence ≈ <b>${fmt$(r.swr || 0)}/yr</b> (${pct(r.w.start > 0 ? (r.swr || 0) / r.w.start * 100 : 0, 1)})`
         : `Median outcome <b>${fmtK(r.g.endP50)}</b> · range ${fmtK(r.g.endP10)}–${fmtK(r.g.endP90)} · ${pct(r.g.lossProb * 100, 0)} chance below invested`;
       return `<div class="rp-insight"><h4>${escapeHtml(label)} — expected ${pct(s.mean * 100, 1)} / ±${pct(s.vol * 100, 1)}</h4>
         <div>${(s.holdings || []).map(h => `${h.ticker} ${pct(h.w * 100, 0)}`).join(' · ')}</div>
         <div style="margin-top:2pt;color:#555">${cls}</div>
         <div class="rpi-act" style="margin-top:3pt">${line}</div></div>`;
     };
+    const noteBy = { plan: `Each portfolio was tested through the full financial plan — spending, guaranteed income, taxes, and required distributions — across ${+P.settings.trials || 800} randomized market simulations.`,
+      withdraw: `Each portfolio funds an inflation-adjusted annual withdrawal across ${+P.settings.trials || 1200} randomized market simulations, with the sustainable draw found at 90% confidence.`,
+      growth: 'Each portfolio compounds a starting amount across 1,500 randomized simulations (no plan cash flows).' };
     if (res.current || res.proposed) pages.push(`<div class="report-page">${rpHead('Portfolio Comparison')}
-      <p class="rp-note">${planMode ? `Each portfolio was tested through the full financial plan — spending, guaranteed income, taxes, and required distributions — across ${+P.settings.trials || 800} randomized market simulations.` : `Each portfolio compounds a starting amount across 1,500 randomized simulations (no plan cash flows).`}</p>
+      <p class="rp-note">${noteBy[pMode]}</p>
       ${one(P.current.name || 'Current portfolio', res.current)}
       ${one(P.proposed.name || 'Proposed portfolio', res.proposed)}
       <p class="rp-disclaimer">Ticker figures are long-run capital-market planning assumptions by asset class — not live market data, past performance, or a guarantee. Single securities carry the asset class’s expected return with concentrated risk.</p>${rpFoot}</div>`);
@@ -3040,7 +4296,25 @@ function handleAction(action, el) {
       if (tot > 0) hs.forEach(h => h.weight = +((+h.weight) / tot * 100).toFixed(1));
       built.portfolio = false; showView('portfolio'); scheduleSave(); break;
     }
-    case 'pl-mode': STATE.portfolios.settings.mode = el.dataset.mode === 'growth' ? 'growth' : 'plan'; built.portfolio = false; showView('portfolio'); scheduleSave(); break;
+    case 'pl-mode': {
+      const st = STATE.portfolios.settings;
+      st.mode = ['plan', 'withdraw', 'growth'].includes(el.dataset.mode) ? el.dataset.mode : 'plan';
+      if (st.mode !== 'plan' && !(+st.start > 0)) st.start = RESULTS.investable || 0;   // seed with the client's investable so the field shows what runs
+      built.portfolio = false; showView('portfolio'); scheduleSave(); break;
+    }
+    case 'pl-wdtype': STATE.portfolios.settings.wdType = el.dataset.mode === 'dollar' ? 'dollar' : 'pct'; built.portfolio = false; showView('portfolio'); scheduleSave(); break;
+    case 'pl-tab': PL_TAB = el.dataset.pf === 'proposed' ? 'proposed' : 'current'; built.portfolio = false; showView('portfolio'); break;
+    case 'pl-paste-toggle': { const box = $(`#plPaste-${el.dataset.pf}`); if (box) { box.hidden = !box.hidden; if (!box.hidden) { const ta = $(`#plPasteText-${el.dataset.pf}`); if (ta) ta.focus(); } } break; }
+    case 'pl-paste-import': {
+      const pf = el.dataset.pf, ta = $(`#plPasteText-${pf}`);
+      const parsed = plParsePaste(ta ? ta.value : '');
+      if (!parsed.length) { toast('Nothing recognized — one holding per line, ticker in (parentheses) or first'); break; }
+      STATE.portfolios[pf].holdings = parsed;
+      const known = parsed.filter(h => tickerLookup(h.ticker)).length;
+      built.portfolio = false; showView('portfolio'); scheduleSave();
+      toast(`Imported <b>${parsed.length}</b> holdings (${known} recognized${known < parsed.length ? ', ' + (parsed.length - known) + ' need a class' : ''})`);
+      break;
+    }
     case 'pl-apply': {                                                 // adopt this portfolio's return & risk as the plan's assumptions
       const pf = el.dataset.pf, stats = portfolioStats(STATE.portfolios[pf].holdings); if (!stats) break;
       const A = STATE.assumptions;
@@ -3123,6 +4397,9 @@ function onInput(e) {
       delete h.cls; delete h.ret; delete h.vol; delete h.name;        // fresh ticker → fresh library lookup
       const r = resolveHolding(h);
       $$(`[data-pl-name="${pf}-${i}"]`).forEach(el => el.textContent = r.known ? r.name : (r.ticker ? 'Unknown ticker — pick an asset class' : 'Type a ticker (SPY, VTI, AAPL…)'));
+      $$(`select[data-pf="${pf}"][data-hidx="${i}"][data-hkey="cls"]`).forEach(el => el.value = r.cls);      // sync the row in place — no rebuild, no lost focus
+      $$(`input[data-pf="${pf}"][data-hidx="${i}"][data-hkey="ret"]`).forEach(el => { el.value = ''; el.placeholder = r.ret; });
+      $$(`input[data-pf="${pf}"][data-hidx="${i}"][data-hkey="vol"]`).forEach(el => { el.value = ''; el.placeholder = r.vol; });
     }
     if (currentView === 'portfolio') livePortfolioLab();
     scheduleSave();
@@ -3202,7 +4479,6 @@ function wireEvents() {
   document.addEventListener('focusout', e => {
     const t = e.target; if (!t || !t.hasAttribute) return;
     if (t.hasAttribute('data-money')) t.value = moneyDisplay(parseMoney(t.value));
-    if (t.matches('[data-pf][data-hkey="ticker"]')) rebuildPlList(t.getAttribute('data-pf'));   // refresh class/return/vol placeholders after a ticker lookup
   });
   document.addEventListener('click', onClick);
   document.addEventListener('keydown', onKey);

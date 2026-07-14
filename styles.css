@@ -425,6 +425,25 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;border-radius:50%;bac
 .empty{text-align:center;padding:3rem 1rem;color:var(--muted)}
 .empty .e-ico{font-size:2rem;color:var(--gold);margin-bottom:.5rem}
 
+/* ============================ PORTFOLIO LAB ============================ */
+.pl-tabs{display:flex;gap:.4rem;margin-bottom:-1px;padding:0 .4rem}
+.pl-tab{padding:.7rem 1.3rem;border:1px solid var(--line);border-bottom:none;border-radius:14px 14px 0 0;
+  background:var(--ivory-2);color:var(--muted);font-size:.9rem;font-weight:600;transition:.15s}
+.pl-tab:hover{color:var(--ink);background:var(--cream)}
+.pl-tab.on{background:var(--paper);color:var(--ink);box-shadow:0 -3px 0 var(--gold) inset;position:relative;z-index:2}
+.pl-tab.on{box-shadow:inset 0 3px 0 var(--gold)}
+.pl-tab-n{display:inline-block;min-width:1.35rem;padding:.05rem .35rem;margin-left:.35rem;border-radius:99px;
+  background:var(--gold-soft);color:var(--gold-deep);font-size:.7rem;font-weight:700;text-align:center}
+.pl-colhead,.pl-row{display:grid;grid-template-columns:108px minmax(180px,1fr) 172px 96px 96px 96px 26px;gap:.5rem;align-items:center}
+.pl-colhead{padding:.15rem .1rem .4rem;font-size:.58rem;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);font-weight:700}
+.pl-row{padding:.28rem 0;border-bottom:1px solid var(--line)}
+.pl-row:last-child{border-bottom:none}
+.pl-row input,.pl-row select{padding:.42rem .55rem;font-size:.86rem}
+.pl-name{font-size:.8rem;color:var(--gold-deep);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:1rem}
+.pl-paste{margin-bottom:.9rem;padding: .8rem;border:1px dashed var(--line-2);border-radius:var(--r-sm);background:var(--ivory)}
+.pl-paste textarea{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8rem}
+@media(max-width:920px){.pl-colhead{display:none}.pl-row{grid-template-columns:100px 1fr 90px 26px;grid-auto-rows:auto}.pl-row select,.pl-row .control:nth-of-type(2),.pl-row .control:nth-of-type(3){display:none}}
+
 /* ============================ TOAST ============================ */
 #toast{position:fixed;bottom:1.4rem;left:50%;transform:translateX(-50%) translateY(20px);z-index:200;
   background:var(--ink);color:#fff;padding:.7rem 1.2rem;border-radius:11px;font-size:.85rem;font-weight:500;
