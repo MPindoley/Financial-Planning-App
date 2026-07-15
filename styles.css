@@ -441,6 +441,8 @@ input[type=range]::-moz-range-thumb{width:19px;height:19px;border-radius:50%;bac
 .pl-row input,.pl-row select{padding:.42rem .55rem;font-size:.86rem}
 .pl-name{font-size:.8rem;color:var(--gold-deep);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-height:1rem}
 .pl-wpct{font-size:.66rem;color:var(--muted);text-align:right;padding:2px .1rem 0 0;line-height:1;min-height:.7rem}
+.pl-htag{font-size:.58rem;font-weight:700;color:var(--gold-deep);background:var(--gold-soft);padding:1px 5px;border-radius:10px;white-space:nowrap;vertical-align:middle}
+.pl-htag.warn{color:#8a6d3b;background:#f3e8cf}
 .pl-method{border:1px solid var(--line-2);border-radius:var(--r-sm);background:var(--ivory);padding:.5rem .9rem}
 .pl-method>summary{cursor:pointer;font-size:.78rem;font-weight:700;color:var(--gold-deep);letter-spacing:.02em}
 .pl-method ul{margin:.6rem 0 .3rem;padding-left:1.1rem}
