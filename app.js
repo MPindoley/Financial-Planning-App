@@ -210,7 +210,15 @@ const Cloud = { key: null, email: null, sess: null, status: 'off', lastSync: 0, 
 const _b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
 const _b64d = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
 const _te = new TextEncoder(), _td = new TextDecoder();
-function cloudCfg() { try { return JSON.parse(localStorage.getItem(CLOUD_CFG_KEY)) || null; } catch { return null; } }
+/* Pre-configured Supabase project, so the app arrives ready on any device — the
+   publishable key is meant to live in client-side code; it only grants the
+   encrypted, per-user access the row-level-security policy allows. A value saved
+   in this browser (via the setup screen) always overrides it. */
+const CLOUD_DEFAULT = { url: 'https://pdixkagltpqxxdlgamzp.supabase.co', anon: 'sb_publishable_V_nStOYmd2yMISEzZzUhag_KBuf24mg' };
+function cloudCfg() {
+  try { const s = JSON.parse(localStorage.getItem(CLOUD_CFG_KEY)); if (s && s.url && s.anon) return s; } catch {}
+  return (CLOUD_DEFAULT.url && CLOUD_DEFAULT.anon) ? CLOUD_DEFAULT : null;   // fall back to the baked-in project
+}
 function setCloudCfg(url, anon) { localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify({ url: String(url || '').trim().replace(/\/+$/, ''), anon: String(anon || '').trim() })); }
 function loadCloudSess() { try { return JSON.parse(localStorage.getItem(CLOUD_SESS_KEY)) || null; } catch { return null; } }
 function saveCloudSess() { if (Cloud.sess) localStorage.setItem(CLOUD_SESS_KEY, JSON.stringify(Cloud.sess)); }
