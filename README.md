@@ -93,6 +93,30 @@ python3 -m http.server 8000      # then visit http://localhost:8000
   your client folders or move them between computers. **Import JSON** loads one
   back in. *Exporting is the reliable way to back up and transfer a plan.*
 
+### Cloud sync across devices (optional, free, end-to-end encrypted)
+So you can reach your plans from any computer, the plan switcher has a **☁ Cloud
+sync** panel. It uses a **free Supabase project you own**, and everything is
+**end-to-end encrypted**: your plans are scrambled on your device with your
+**master password** *before* they upload, so the service only ever stores
+ciphertext it cannot read — even the client names are inside the encryption.
+
+- **One-time setup (~10 min):** create a free project at **supabase.com**, run
+  the one SQL snippet the panel gives you (creates a private, per-user table),
+  and paste your **Project URL** and **anon public key** into the panel. Full
+  steps are shown right in the app.
+- **Then:** sign up with any email + a master password. On any other device,
+  install the app, enter the same project details, and log in — your plans
+  download and decrypt automatically. Changes sync in the background as you work.
+- **Offline-first:** the browser copy is still the working copy, so the app is
+  exactly as fast and works with no internet in a meeting; it syncs when you're
+  back online.
+- **Important:** the master password both signs you in *and* is the encryption
+  key. It is never sent to the server, so **if you forget it the encrypted data
+  cannot be recovered** — store it somewhere safe (and keep the occasional
+  **Export JSON** as a belt-and-suspenders backup). A free Supabase project also
+  pauses after ~1 week of no use; a click in the Supabase dashboard resumes it,
+  and your local copy and backups are never affected.
+
 ### Printing / saving a PDF for the meeting
 1. Click **Report** in the toolbar.
 2. Choose **Client copy** (excludes your private notes) or **Advisor copy**, and

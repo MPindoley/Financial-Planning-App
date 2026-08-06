@@ -521,6 +521,29 @@ body.present .split:has(> .advisor-only){grid-template-columns:1fr !important}
 .rd-head h2{font-family:var(--ff);font-size:1.55rem;font-weight:600}
 .rd-body{padding:1.2rem 1.5rem;overflow:auto}
 .rd-foot{display:flex;justify-content:flex-end;gap:.6rem;padding:1rem 1.5rem;border-top:1px solid var(--line);background:var(--ivory)}
+/* cloud sync */
+#cloudModal{position:fixed;inset:0;z-index:130;background:rgba(15,26,43,.55);backdrop-filter:blur(5px);display:grid;place-items:center;padding:1.5rem}
+.cloud-dialog{width:min(600px,100%)}
+.cloud-lead{font-size:.9rem;color:var(--muted);line-height:1.55;margin-bottom:.6rem}
+.cloud-warn{font-size:.82rem;background:var(--gold-soft);border:1px solid var(--gold);border-radius:10px;padding:.6rem .8rem;line-height:1.5;margin:.7rem 0}
+.cloud-steps{margin:.4rem 0 1rem;padding-left:1.2rem;font-size:.86rem;color:var(--ink);line-height:1.6}
+.cloud-steps li{margin-bottom:.55rem}
+.cloud-sql{margin-top:.5rem}
+.cloud-sql pre{background:#0f1a2b;color:#e8eef7;font-family:ui-monospace,Menlo,monospace;font-size:.72rem;padding:.7rem .8rem;border-radius:8px;overflow-x:auto;white-space:pre;margin-bottom:.4rem}
+.cloud-field{margin-bottom:.7rem}
+.cloud-field label{display:block;font-size:.72rem;font-weight:600;color:var(--muted);margin-bottom:.25rem}
+.cloud-field input{width:100%;padding:.55rem .7rem;font-size:.9rem;border:1px solid var(--line-2);border-radius:8px;background:var(--paper)}
+.cloud-hint{font-size:.74rem;color:var(--faint);margin:.3rem 0 .8rem}
+.cloud-actrow{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-top:.5rem}
+.cloud-msg{margin-top:.7rem;font-size:.82rem;min-height:1.1rem}
+.cloud-msg .err{color:#b3261e}
+.cloud-msg .ok{color:#2e7d32}
+.cloud-status-card{background:var(--ivory);border:1px solid var(--line);border-radius:10px;padding:.7rem .9rem;font-size:.86rem;margin-bottom:.2rem}
+.cloud-menu{padding:.2rem .1rem 0}
+.cloud-row{display:flex;align-items:center;gap:.45rem;font-size:.76rem;color:var(--muted);padding:.15rem .5rem .35rem}
+.cloud-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cloud-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
+.cloud-dot.good{background:#33a852}.cloud-dot.warn{background:#e0a52e}.cloud-dot.faint{background:var(--faint)}
 .rep-opt{display:flex;align-items:flex-start;gap:.7rem;padding:.7rem .2rem;border-bottom:1px solid var(--line)}
 .rep-opt:last-child{border-bottom:none}
 .rep-opt input{width:auto;margin-top:.25rem}

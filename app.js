@@ -193,6 +193,140 @@ function loadStore() { try { return JSON.parse(localStorage.getItem(LS_KEY)) || 
 function saveStore(s) { try { localStorage.setItem(LS_KEY, JSON.stringify(s)); return true; } catch { return false; } }
 function planLabel(st) { return (st.household?.client?.name || '').trim() || 'New Client'; }
 
+/* ----------------------------- cloud sync (zero-knowledge, end-to-end) -------
+   One master password unlocks everything. From it (+ your email) the app derives
+   TWO independent keys: an auth secret that logs you into Supabase, and a
+   separate AES-GCM key that encrypts your plans ON THIS DEVICE before upload.
+   The server only ever stores ciphertext and only ever sees the derived auth
+   secret — never your real password, never the encryption key. localStorage
+   stays the working copy, so the app is unchanged offline. */
+const CLOUD_CFG_KEY = 'mp_fp_cloud_cfg_v1';      // {url, anon}  — not secret (anon key is public by design)
+const CLOUD_SESS_KEY = 'mp_fp_cloud_sess_v1';    // {email, access_token, refresh_token, exp, uid}
+const CLOUD_BACKUP_KEY = 'mp_fp_backup_presync_v1';
+const CLOUD_PEPPER = 'mp-fp-e2e-v1';             // fixed app component mixed into every derivation
+const CLOUD_PBKDF2_ITERS = 210000;
+const Cloud = { key: null, email: null, sess: null, status: 'off', lastSync: 0, busy: false, lastError: '' };
+
+const _b64 = buf => btoa(String.fromCharCode(...new Uint8Array(buf)));
+const _b64d = str => Uint8Array.from(atob(str), c => c.charCodeAt(0));
+const _te = new TextEncoder(), _td = new TextDecoder();
+function cloudCfg() { try { return JSON.parse(localStorage.getItem(CLOUD_CFG_KEY)) || null; } catch { return null; } }
+function setCloudCfg(url, anon) { localStorage.setItem(CLOUD_CFG_KEY, JSON.stringify({ url: String(url || '').trim().replace(/\/+$/, ''), anon: String(anon || '').trim() })); }
+function loadCloudSess() { try { return JSON.parse(localStorage.getItem(CLOUD_SESS_KEY)) || null; } catch { return null; } }
+function saveCloudSess() { if (Cloud.sess) localStorage.setItem(CLOUD_SESS_KEY, JSON.stringify(Cloud.sess)); }
+function clearCloudSess() { localStorage.removeItem(CLOUD_SESS_KEY); Cloud.sess = null; Cloud.key = null; Cloud.email = null; }
+
+async function _pbkdf2(pass, saltStr, bytes) {
+  const base = await crypto.subtle.importKey('raw', _te.encode(pass), 'PBKDF2', false, ['deriveBits']);
+  const bits = await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt: _te.encode(saltStr), iterations: CLOUD_PBKDF2_ITERS }, base, bytes * 8);
+  return new Uint8Array(bits);
+}
+async function deriveAuthPassword(masterPass, email) {                 // what Supabase receives as the "password"
+  return _b64(await _pbkdf2(masterPass, 'mp-auth|' + String(email).toLowerCase() + '|' + CLOUD_PEPPER, 32));
+}
+async function deriveEncKey(masterPass, email) {                        // never leaves the device
+  const raw = await _pbkdf2(masterPass, 'mp-enc|' + String(email).toLowerCase() + '|' + CLOUD_PEPPER, 32);
+  return crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, ['encrypt', 'decrypt']);
+}
+async function encryptBlob(key, obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, _te.encode(JSON.stringify(obj)));
+  return 'v1:' + _b64(iv) + ':' + _b64(ct);
+}
+async function decryptBlob(key, blob) {
+  const parts = String(blob).split(':');
+  if (parts[0] !== 'v1' || parts.length !== 3) throw new Error('Unrecognized data format');
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: _b64d(parts[1]) }, key, _b64d(parts[2]));
+  return JSON.parse(_td.decode(pt));
+}
+
+async function cloudApi(path, opts = {}) {
+  const cfg = cloudCfg(); if (!cfg || !cfg.url || !cfg.anon) throw new Error('Cloud is not set up yet');
+  const headers = Object.assign({ apikey: cfg.anon, 'Content-Type': 'application/json' }, opts.headers || {});
+  return fetch(cfg.url + path, Object.assign({}, opts, { headers }));
+}
+const _authHeader = () => ({ Authorization: 'Bearer ' + (Cloud.sess && Cloud.sess.access_token) });
+async function ensureToken() {
+  if (!Cloud.sess) throw new Error('Not signed in');
+  if (Date.now() < Cloud.sess.exp - 60000) return;
+  const res = await cloudApi('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: JSON.stringify({ refresh_token: Cloud.sess.refresh_token }) });
+  const j = await res.json(); if (!res.ok) throw new Error('Session expired — please sign in again');
+  Cloud.sess.access_token = j.access_token; Cloud.sess.refresh_token = j.refresh_token || Cloud.sess.refresh_token;
+  Cloud.sess.exp = Date.now() + (j.expires_in || 3600) * 1000; saveCloudSess();
+}
+async function cloudSignup(email, masterPass) {
+  const password = await deriveAuthPassword(masterPass, email);
+  const res = await cloudApi('/auth/v1/signup', { method: 'POST', body: JSON.stringify({ email, password }) });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(j.msg || j.error_description || j.error || 'Sign-up failed');
+  return j.access_token ? await cloudLogin(email, masterPass) : { needsConfirm: true };
+}
+async function cloudLogin(email, masterPass) {
+  const password = await deriveAuthPassword(masterPass, email);
+  const res = await cloudApi('/auth/v1/token?grant_type=password', { method: 'POST', body: JSON.stringify({ email, password }) });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const m = j.error_description || j.msg || j.error || '';
+    if (/confirm/i.test(m)) throw new Error('Email not confirmed yet — click the link Supabase emailed you, then log in.');
+    throw new Error(/invalid|grant|credential/i.test(m) ? 'Wrong email or password.' : (m || 'Login failed'));
+  }
+  Cloud.email = email;
+  Cloud.key = await deriveEncKey(masterPass, email);
+  Cloud.sess = { email, access_token: j.access_token, refresh_token: j.refresh_token, exp: Date.now() + (j.expires_in || 3600) * 1000, uid: j.user && j.user.id };
+  Cloud.status = 'ready'; saveCloudSess();
+  return { ok: true };
+}
+async function cloudUnlock(masterPass) {                                // re-derive the key for an existing session (e.g. after reload)
+  if (!Cloud.sess) throw new Error('Not signed in');
+  const check = await deriveAuthPassword(masterPass, Cloud.sess.email);
+  // verify the passphrase by attempting a real login (also refreshes tokens)
+  const r = await cloudLogin(Cloud.sess.email, masterPass);
+  return r;
+}
+async function cloudPull() {
+  await ensureToken();
+  const res = await cloudApi('/rest/v1/vault?select=data,updated_at&user_id=eq.' + encodeURIComponent(Cloud.sess.uid), { headers: _authHeader() });
+  if (!res.ok) throw new Error('Could not read from the cloud'); const rows = await res.json();
+  if (!rows.length) return null;
+  const obj = await decryptBlob(Cloud.key, rows[0].data);               // { store, updatedAt }
+  return { store: obj.store, updatedAt: +obj.updatedAt || Date.parse(rows[0].updated_at) || 0 };
+}
+async function cloudPush() {
+  await ensureToken();
+  const store = loadStore(), updatedAt = Date.now();
+  const blob = await encryptBlob(Cloud.key, { store, updatedAt });
+  const body = [{ user_id: Cloud.sess.uid, data: blob, updated_at: new Date(updatedAt).toISOString() }];
+  const res = await cloudApi('/rest/v1/vault', { method: 'POST', headers: Object.assign(_authHeader(), { Prefer: 'resolution=merge-duplicates,return=minimal' }), body: JSON.stringify(body) });
+  if (!res.ok) throw new Error('Could not save to the cloud: ' + (await res.text().catch(() => res.status)));
+  Cloud.lastSync = updatedAt; return updatedAt;
+}
+const localStoreUpdatedAt = () => { const s = loadStore(); return Math.max(0, ...Object.values(s.plans || {}).map(p => +p.updatedAt || 0)); };
+async function cloudSyncNow() {                                         // pull, decide newest, then reconcile
+  if (Cloud.status !== 'ready') throw new Error('Unlock cloud sync first');
+  const remote = await cloudPull();
+  const localAt = localStoreUpdatedAt();
+  if (remote && remote.updatedAt > localAt + 1500) {                   // remote is newer → adopt it (after a safety backup)
+    localStorage.setItem(CLOUD_BACKUP_KEY, JSON.stringify(loadStore()));
+    saveStore(remote.store);
+    return { applied: 'remote' };
+  }
+  await cloudPush();                                                    // local is newer/equal → publish it
+  return { applied: remote ? 'local' : 'first' };
+}
+const cloudMaybePush = debounce(() => {
+  if (Cloud.status !== 'ready' || Cloud.busy) return;
+  if (!navigator.onLine) return;
+  Cloud.busy = true;
+  cloudPush().then(() => { Cloud.lastError = ''; }).catch(e => { Cloud.lastError = e.message; })
+    .finally(() => { Cloud.busy = false; renderCloudStatus(); });
+}, 2500);
+function initCloudSession() {                                          // on load: restore session (locked until passphrase re-entered)
+  const cfg = cloudCfg(); if (!cfg) { Cloud.status = 'off'; return; }
+  const s = loadCloudSess();
+  if (s && s.access_token) { Cloud.sess = s; Cloud.email = s.email; Cloud.status = 'locked'; }
+  else Cloud.status = 'signedout';
+}
+
 /* ----------------------------- tax engine --------------------------------- */
 /* 2026 federal parameters (IRS Rev. Proc. 2025-32), inflated forward each year. */
 const TAX = {
@@ -2774,6 +2908,7 @@ function saveCurrent() {
   store.plans[currentPlanId] = { id: currentPlanId, name: planLabel(STATE), updatedAt: Date.now(), state: STATE };
   store.current = currentPlanId; saveStore(store);
   setStatus('Saved');
+  cloudMaybePush();                                                     // mirror to the cloud when signed in & unlocked
 }
 const scheduleSave = debounce(saveCurrent, 600);
 function updateHeader() {
@@ -4285,7 +4420,128 @@ function renderPlanMenu() {
       <button class="btn sm" data-action="duplicate">Duplicate</button></div>
     <div class="menu-act">
       <button class="btn sm" data-action="export">⤓ Export JSON</button>
-      <button class="btn sm" data-action="import">⤒ Import JSON</button></div>`;
+      <button class="btn sm" data-action="import">⤒ Import JSON</button></div>
+    <div class="menu-sep"></div>${cloudMenuBlock()}`;
+}
+function cloudMenuBlock() {
+  const s = Cloud.status, mail = Cloud.email ? escapeHtml(Cloud.email) : '';
+  const dot = s === 'ready' ? 'good' : s === 'locked' ? 'warn' : 'faint';
+  const label = s === 'off' ? 'Cloud sync — off'
+    : s === 'signedout' ? 'Cloud sync — set up, not signed in'
+    : s === 'locked' ? `Cloud — ${mail} · locked`
+    : Cloud.lastError ? `Cloud — ${mail} · sync error`
+    : `Cloud — ${mail} · ${Cloud.lastSync ? 'synced ' + timeAgo(Cloud.lastSync) : 'signed in'}`;
+  const btn = s === 'off' ? 'Set up cloud sync'
+    : s === 'signedout' ? 'Sign in'
+    : s === 'locked' ? 'Unlock' : 'Manage sync';
+  return `<div class="cloud-menu">
+      <div class="cloud-row"><span class="cloud-dot ${dot}"></span><span class="cloud-lbl">${label}</span></div>
+      <div class="menu-act">
+        <button class="btn sm gold" data-action="cloud-open">☁ ${btn}</button>
+        ${s === 'ready' ? '<button class="btn sm" data-action="cloud-sync">Sync now</button>' : ''}
+      </div>
+    </div>`;
+}
+function timeAgo(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return 'just now'; if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago'; return Math.floor(s / 86400) + 'd ago';
+}
+function renderCloudStatus() { if ($('#planMenu') && !$('#planMenu').hidden) renderPlanMenu(); if ($('#cloudModal') && !$('#cloudModal').hidden) renderCloudModal(); }
+
+const CLOUD_SETUP_SQL =
+`create table if not exists public.vault (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  data text not null,
+  updated_at timestamptz not null default now()
+);
+alter table public.vault enable row level security;
+create policy "own vault" on public.vault
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);`;
+
+function ensureCloudModal() {
+  if ($('#cloudModal')) return;
+  const d = document.createElement('div'); d.id = 'cloudModal'; d.hidden = true;
+  d.innerHTML = `<div class="report-dialog cloud-dialog">
+    <header class="rd-head"><h2>☁ Cloud sync</h2><button class="icon-btn ghost" data-action="cloud-close">Close ✕</button></header>
+    <div class="rd-body" id="cloudBody"></div></div>`;
+  document.body.appendChild(d);
+  d.addEventListener('click', e => { if (e.target === d) closeCloudModal(); });
+}
+function openCloudModal() { ensureCloudModal(); $('#cloudModal').hidden = false; renderCloudModal(); }
+function closeCloudModal() { const m = $('#cloudModal'); if (m) m.hidden = true; }
+function renderCloudModal() {
+  const body = $('#cloudBody'); if (!body) return;
+  const cfg = cloudCfg();
+  const warn = `<p class="cloud-warn">🔒 <b>End-to-end encrypted.</b> Your plans are scrambled on this device with your master password before they’re uploaded — the server can never read them. <b>If you forget the master password, the encrypted data can’t be recovered</b>, so store it somewhere safe.</p>`;
+  if (Cloud.status === 'off' || !cfg) {
+    body.innerHTML = `
+      <p class="cloud-lead">Set this up once to reach your plans from any device — for free. Your client data is encrypted on your device first, so the cloud only ever holds unreadable ciphertext.</p>
+      <ol class="cloud-steps">
+        <li>Create a free project at <b>supabase.com</b> → <i>New project</i> (pick any name; wait ~2 min for it to finish).</li>
+        <li>Open the project’s <b>SQL Editor</b>, paste the snippet below, and click <b>Run</b>. It creates one private table locked to your account.
+          <div class="cloud-sql"><pre id="cloudSql">${escapeHtml(CLOUD_SETUP_SQL)}</pre><button class="btn sm" data-action="cloud-copy-sql">Copy SQL</button></div></li>
+        <li>Go to <b>Project Settings → API</b> and copy your <b>Project URL</b> and the <b>anon public</b> key into the two boxes here.</li>
+      </ol>
+      <div class="cloud-field"><label>Project URL</label><input type="text" id="cloudUrl" placeholder="https://xxxxx.supabase.co" value="${escapeAttr(cfg ? cfg.url : '')}"></div>
+      <div class="cloud-field"><label>anon public key</label><input type="text" id="cloudAnon" placeholder="eyJhbGciOi…" value="${escapeAttr(cfg ? cfg.anon : '')}"></div>
+      <p class="cloud-hint">The anon key is meant to be public — it only permits the encrypted, per-user access the SQL above defines.</p>
+      <div class="rd-foot" style="padding:0;border:none"><button class="btn gold" data-action="cloud-save-cfg">Save & continue →</button></div>`;
+    return;
+  }
+  if (Cloud.status === 'signedout') {
+    body.innerHTML = `
+      <p class="cloud-lead">Sign in to sync. <b>First time?</b> Create your account with any email and a <b>master password</b> — that password both signs you in and encrypts your data.</p>
+      ${warn}
+      <div class="cloud-field"><label>Email</label><input type="email" id="cloudEmail" placeholder="you@practice.com" autocomplete="username"></div>
+      <div class="cloud-field"><label>Master password</label><input type="password" id="cloudPass" placeholder="Choose a strong one you’ll remember" autocomplete="current-password"></div>
+      <div class="cloud-actrow">
+        <button class="btn gold" data-action="cloud-login">Log in</button>
+        <button class="btn" data-action="cloud-signup">Create account</button>
+        <button class="btn ghost sm" data-action="cloud-reset-cfg">Change project</button>
+      </div>
+      <div id="cloudMsg" class="cloud-msg"></div>`;
+    return;
+  }
+  if (Cloud.status === 'locked') {
+    body.innerHTML = `
+      <p class="cloud-lead">Welcome back, <b>${escapeHtml(Cloud.email)}</b>. Enter your master password to unlock and sync on this device.</p>
+      <div class="cloud-field"><label>Master password</label><input type="password" id="cloudPass" placeholder="Master password" autocomplete="current-password"></div>
+      <div class="cloud-actrow">
+        <button class="btn gold" data-action="cloud-unlock">Unlock & sync</button>
+        <button class="btn ghost sm" data-action="cloud-logout">Sign out</button>
+      </div>
+      <div id="cloudMsg" class="cloud-msg"></div>`;
+    return;
+  }
+  // ready
+  body.innerHTML = `
+    <p class="cloud-lead">Signed in as <b>${escapeHtml(Cloud.email)}</b>. Your plans sync automatically as you work.</p>
+    <div class="cloud-status-card">
+      <div><span class="cloud-dot good"></span> ${Cloud.lastError ? 'Last sync failed: ' + escapeHtml(Cloud.lastError) : (Cloud.lastSync ? 'Last synced ' + timeAgo(Cloud.lastSync) : 'Signed in — no sync yet')}</div>
+    </div>
+    ${warn}
+    <div class="cloud-actrow">
+      <button class="btn gold" data-action="cloud-sync">Sync now</button>
+      <button class="btn" data-action="cloud-logout">Sign out</button>
+      <button class="btn ghost sm" data-action="cloud-reset-cfg">Change project</button>
+    </div>
+    <div id="cloudMsg" class="cloud-msg"></div>`;
+}
+function cloudMsg(text, kind) { const el = $('#cloudMsg'); if (el) el.innerHTML = `<span class="${kind || ''}">${escapeHtml(text)}</span>`; }
+async function cloudAfterAuth() {                                        // pull-or-push, then reload the app with whatever is newest
+  cloudMsg('Syncing…');
+  try {
+    const r = await cloudSyncNow();
+    if (r.applied === 'remote') {
+      const store = loadStore(); const ids = Object.keys(store.plans);
+      currentPlanId = store.current && store.plans[store.current] ? store.current : ids[0];
+      STATE = ensureDefaults(store.plans[currentPlanId].state);
+      resetBuilt(); RESULTS = compute(STATE); updateHeader(); showView('dashboard');
+      toast('Your plans were restored from the cloud ☁');
+    } else toast(r.applied === 'first' ? 'Cloud sync is on — this device is now backed up' : 'Synced to the cloud ☁');
+  } catch (e) { cloudMsg(e.message, 'err'); return; }
+  closeCloudModal(); renderPlanMenu();
 }
 function openPlanMenu() { renderPlanMenu(); $('#planMenu').hidden = false; $('#planMenuBtn').setAttribute('aria-expanded', 'true'); }
 function closePlanMenu() { $('#planMenu').hidden = true; $('#planMenuBtn').setAttribute('aria-expanded', 'false'); }
@@ -4477,6 +4733,44 @@ function handleAction(action, el) {
     case 'duplicate': closePlanMenu(); duplicatePlan(); break;
     case 'export': exportPlan(); break;
     case 'import': $('#importFile').click(); break;
+    case 'cloud-open': closePlanMenu(); openCloudModal(); break;
+    case 'cloud-close': closeCloudModal(); break;
+    case 'cloud-copy-sql': navigator.clipboard && navigator.clipboard.writeText(CLOUD_SETUP_SQL).then(() => toast('SQL copied')).catch(() => toast('Select and copy the SQL manually')); break;
+    case 'cloud-save-cfg': {
+      const url = ($('#cloudUrl') || {}).value || '', anon = ($('#cloudAnon') || {}).value || '';
+      if (!/^https:\/\/.+/.test(url.trim()) || anon.trim().length < 20) { toast('Enter a valid https Project URL and the anon key'); break; }
+      setCloudCfg(url, anon); Cloud.status = 'signedout'; renderCloudModal(); renderPlanMenu(); break;
+    }
+    case 'cloud-signup': {
+      const email = (($('#cloudEmail') || {}).value || '').trim(), pass = ($('#cloudPass') || {}).value || '';
+      if (!email || pass.length < 8) { cloudMsg('Use a real email and a master password of at least 8 characters.', 'err'); break; }
+      cloudMsg('Creating your account…');
+      cloudSignup(email, pass).then(r => { if (r && r.needsConfirm) cloudMsg('Account created — click the link Supabase emailed you, then Log in.', 'ok'); else cloudAfterAuth(); })
+        .catch(e => cloudMsg(e.message, 'err'));
+      break;
+    }
+    case 'cloud-login': {
+      const email = (($('#cloudEmail') || {}).value || '').trim(), pass = ($('#cloudPass') || {}).value || '';
+      if (!email || !pass) { cloudMsg('Enter your email and master password.', 'err'); break; }
+      cloudMsg('Signing in…');
+      cloudLogin(email, pass).then(() => cloudAfterAuth()).catch(e => cloudMsg(e.message, 'err'));
+      break;
+    }
+    case 'cloud-unlock': {
+      const pass = ($('#cloudPass') || {}).value || '';
+      if (!pass) { cloudMsg('Enter your master password.', 'err'); break; }
+      cloudMsg('Unlocking…');
+      cloudUnlock(pass).then(() => cloudAfterAuth()).catch(e => cloudMsg(e.message, 'err'));
+      break;
+    }
+    case 'cloud-sync': {
+      if (Cloud.status !== 'ready') { openCloudModal(); break; }
+      toast('Syncing…'); cloudSyncNow().then(r => { renderCloudStatus(); toast(r.applied === 'remote' ? 'Pulled the newer copy from the cloud' : 'Synced ☁'); if (r.applied === 'remote') cloudAfterAuth(); })
+        .catch(e => toast('Sync failed: ' + e.message));
+      break;
+    }
+    case 'cloud-logout': clearCloudSess(); Cloud.status = cloudCfg() ? 'signedout' : 'off'; renderCloudModal(); renderPlanMenu(); toast('Signed out of cloud sync'); break;
+    case 'cloud-reset-cfg': if (confirm('Forget this Supabase project on this device? Your plans stay on this computer; you can set up sync again anytime.')) { localStorage.removeItem(CLOUD_CFG_KEY); clearCloudSess(); Cloud.status = 'off'; renderCloudModal(); renderPlanMenu(); } break;
     case 'add-asset': (STATE.assets = STATE.assets || []).push({ id: uid(), name: '', type: 'taxable', balance: 0, contribution: 0, growth: '' }); rebuildAssets(); recompute(); break;
     case 'del-asset': STATE.assets.splice(idx, 1); rebuildAssets(); recompute(); break;
     case 'add-liab': (STATE.liabilities = STATE.liabilities || []).push({ id: uid(), name: '', type: 'auto', balance: 0, rate: 6, payment: 0 }); rebuildLiabs(); recompute(); break;
@@ -4746,6 +5040,7 @@ function init() {
   else if (ids.length) { currentPlanId = ids[0]; STATE = ensureDefaults(store.plans[ids[0]].state); }
   else { currentPlanId = uid(); STATE = ensureDefaults(sampleState()); }
   RESULTS = compute(STATE);
+  initCloudSession();                                                   // restore cloud session (locked until passphrase re-entered)
   wireEvents();
   saveCurrent();
   document.body.classList.toggle('inputs-collapsed', !!(STATE.ui && STATE.ui.collapsed));
