@@ -294,7 +294,8 @@ async function cloudUnlock(masterPass) {                                // re-de
 async function cloudPull() {
   await ensureToken();
   const res = await cloudApi('/rest/v1/vault?select=data,updated_at&user_id=eq.' + encodeURIComponent(Cloud.sess.uid), { headers: _authHeader() });
-  if (!res.ok) throw new Error('Could not read from the cloud'); const rows = await res.json();
+  if (!res.ok) throw new Error('Could not read from the cloud (HTTP ' + res.status + ')' + (res.status === 401 ? ' — the table grant may be missing' : '') + ': ' + (await res.text().catch(() => '')).slice(0, 180));
+  const rows = await res.json();
   if (!rows.length) return null;
   const obj = await decryptBlob(Cloud.key, rows[0].data);               // { store, updatedAt }
   return { store: obj.store, updatedAt: +obj.updatedAt || Date.parse(rows[0].updated_at) || 0 };
@@ -305,27 +306,53 @@ async function cloudPush() {
   const blob = await encryptBlob(Cloud.key, { store, updatedAt });
   const body = [{ user_id: Cloud.sess.uid, data: blob, updated_at: new Date(updatedAt).toISOString() }];
   const res = await cloudApi('/rest/v1/vault', { method: 'POST', headers: Object.assign(_authHeader(), { Prefer: 'resolution=merge-duplicates,return=minimal' }), body: JSON.stringify(body) });
-  if (!res.ok) throw new Error('Could not save to the cloud: ' + (await res.text().catch(() => res.status)));
+  if (!res.ok) throw new Error('Could not save to the cloud (HTTP ' + res.status + '): ' + (await res.text().catch(() => '')).slice(0, 180));
   Cloud.lastSync = updatedAt; return updatedAt;
 }
-const localStoreUpdatedAt = () => { const s = loadStore(); return Math.max(0, ...Object.values(s.plans || {}).map(p => +p.updatedAt || 0)); };
-async function cloudSyncNow() {                                         // pull, decide newest, then reconcile
-  if (Cloud.status !== 'ready') throw new Error('Unlock cloud sync first');
-  const remote = await cloudPull();
-  const localAt = localStoreUpdatedAt();
-  if (remote && remote.updatedAt > localAt + 1500) {                   // remote is newer → adopt it (after a safety backup)
-    localStorage.setItem(CLOUD_BACKUP_KEY, JSON.stringify(loadStore()));
-    saveStore(remote.store);
-    return { applied: 'remote' };
+/* Is this plan record the untouched demo client? (Never sync the demo between devices.) */
+function isFreshSample(rec) {
+  try {
+    const sig = st => {                                                 // fingerprint that ignores volatile ids/timestamps
+      const c = JSON.parse(JSON.stringify(st || {}));
+      delete c.meta; delete c.ui; delete c.presentation; delete c.baseline;
+      (function strip(o) { if (Array.isArray(o)) o.forEach(strip); else if (o && typeof o === 'object') { delete o.id; for (const k in o) strip(o[k]); } })(c);
+      return JSON.stringify(c);
+    };
+    return !!(rec && rec.state) && sig(rec.state) === sig(ensureDefaults(sampleState()));
+  } catch { return false; }
+}
+/* Union two stores by client id — the newer save wins, nothing is ever dropped, the demo is left out. */
+function mergeStores(base, overlay) {
+  const plans = {};
+  for (const id in (base.plans || {})) plans[id] = base.plans[id];
+  for (const id in (overlay.plans || {})) {
+    const op = overlay.plans[id];
+    if (!plans[id] || (+op.updatedAt || 0) > (+plans[id].updatedAt || 0)) plans[id] = op;
   }
-  await cloudPush();                                                    // local is newer/equal → publish it
-  return { applied: remote ? 'local' : 'first' };
+  const ids = Object.keys(plans);
+  if (ids.length > 1) for (const id of ids) if (isFreshSample(plans[id])) delete plans[id];   // drop the demo unless it's the only thing
+  const current = (base.current && plans[base.current]) ? base.current
+    : (overlay.current && plans[overlay.current]) ? overlay.current : Object.keys(plans)[0] || null;
+  return { plans, current, syncedAt: Date.now() };
+}
+/* The one sync step: pull the cloud, merge with local, save, push the union back so every device converges. */
+async function cloudReconcile() {
+  const remote = await cloudPull();                                    // { store, updatedAt } | null
+  const local = loadStore();
+  localStorage.setItem(CLOUD_BACKUP_KEY, JSON.stringify(local));       // safety copy before we change anything
+  const next = remote ? mergeStores(remote.store, local) : mergeStores(local, { plans: {} });
+  saveStore(next);
+  await cloudPush();
+  return { hadRemote: !!remote, plans: Object.keys(next.plans).length };
+}
+async function cloudSyncNow() {
+  if (Cloud.status !== 'ready') throw new Error('Unlock cloud sync first');
+  return cloudReconcile();
 }
 const cloudMaybePush = debounce(() => {
-  if (Cloud.status !== 'ready' || Cloud.busy) return;
-  if (!navigator.onLine) return;
+  if (Cloud.status !== 'ready' || Cloud.busy || !navigator.onLine) return;
   Cloud.busy = true;
-  cloudPush().then(() => { Cloud.lastError = ''; }).catch(e => { Cloud.lastError = e.message; })
+  cloudReconcile().then(() => { Cloud.lastError = ''; }).catch(e => { Cloud.lastError = e.message; })
     .finally(() => { Cloud.busy = false; renderCloudStatus(); });
 }, 2500);
 function initCloudSession() {                                          // on load: restore session (locked until passphrase re-entered)
@@ -4464,6 +4491,7 @@ const CLOUD_SETUP_SQL =
   updated_at timestamptz not null default now()
 );
 alter table public.vault enable row level security;
+grant select, insert, update, delete on public.vault to authenticated;
 create policy "own vault" on public.vault
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);`;
 
@@ -4537,17 +4565,20 @@ function renderCloudModal() {
     <div id="cloudMsg" class="cloud-msg"></div>`;
 }
 function cloudMsg(text, kind) { const el = $('#cloudMsg'); if (el) el.innerHTML = `<span class="${kind || ''}">${escapeHtml(text)}</span>`; }
-async function cloudAfterAuth() {                                        // pull-or-push, then reload the app with whatever is newest
+async function cloudAfterAuth() {                                        // reconcile, then show the account's data on this device
   cloudMsg('Syncing…');
   try {
-    const r = await cloudSyncNow();
-    if (r.applied === 'remote') {
-      const store = loadStore(); const ids = Object.keys(store.plans);
-      currentPlanId = store.current && store.plans[store.current] ? store.current : ids[0];
+    const r = await cloudReconcile();
+    const store = loadStore(); const ids = Object.keys(store.plans);
+    if (ids.length) {
+      currentPlanId = (store.current && store.plans[store.current]) ? store.current
+        : (store.plans[currentPlanId] ? currentPlanId : ids[0]);
       STATE = ensureDefaults(store.plans[currentPlanId].state);
-      resetBuilt(); RESULTS = compute(STATE); updateHeader(); showView('dashboard');
-      toast('Your plans were restored from the cloud ☁');
-    } else toast(r.applied === 'first' ? 'Cloud sync is on — this device is now backed up' : 'Synced to the cloud ☁');
+      resetBuilt(); RESULTS = compute(STATE);
+      document.body.classList.toggle('inputs-collapsed', !!(STATE.ui && STATE.ui.collapsed));
+      updateHeader(); showView(currentView || 'dashboard'); refreshAll();
+    } else { newPlan(); }
+    toast(r.hadRemote ? 'Your plans are synced ☁' : 'Cloud sync is on — this device is backed up ☁');
   } catch (e) { cloudMsg(e.message, 'err'); return; }
   closeCloudModal(); renderPlanMenu();
 }
@@ -4771,12 +4802,10 @@ function handleAction(action, el) {
       cloudUnlock(pass).then(() => cloudAfterAuth()).catch(e => cloudMsg(e.message, 'err'));
       break;
     }
-    case 'cloud-sync': {
+    case 'cloud-sync':
       if (Cloud.status !== 'ready') { openCloudModal(); break; }
-      toast('Syncing…'); cloudSyncNow().then(r => { renderCloudStatus(); toast(r.applied === 'remote' ? 'Pulled the newer copy from the cloud' : 'Synced ☁'); if (r.applied === 'remote') cloudAfterAuth(); })
-        .catch(e => toast('Sync failed: ' + e.message));
+      toast('Syncing…'); cloudAfterAuth();
       break;
-    }
     case 'cloud-logout': clearCloudSess(); Cloud.status = cloudCfg() ? 'signedout' : 'off'; renderCloudModal(); renderPlanMenu(); toast('Signed out of cloud sync'); break;
     case 'cloud-reset-cfg': if (confirm('Forget this Supabase project on this device? Your plans stay on this computer; you can set up sync again anytime.')) { localStorage.removeItem(CLOUD_CFG_KEY); clearCloudSess(); Cloud.status = 'off'; renderCloudModal(); renderPlanMenu(); } break;
     case 'add-asset': (STATE.assets = STATE.assets || []).push({ id: uid(), name: '', type: 'taxable', balance: 0, contribution: 0, growth: '' }); rebuildAssets(); recompute(); break;
