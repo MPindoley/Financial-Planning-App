@@ -544,6 +544,23 @@ body.present .split:has(> .advisor-only){grid-template-columns:1fr !important}
 .cloud-lbl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cloud-dot{width:8px;height:8px;border-radius:50%;flex:none;background:var(--faint)}
 .cloud-dot.good{background:#33a852}.cloud-dot.warn{background:#e0a52e}.cloud-dot.faint{background:var(--faint)}
+/* sequence-of-returns risk */
+.seq-picklab{font-size:.8rem;color:var(--muted);margin:.25rem 0 .4rem;display:flex;align-items:center;flex-wrap:wrap;gap:.3rem}
+.seq-chips{display:flex;flex-wrap:wrap;gap:.3rem;margin-bottom:.3rem}
+.seq-chip{min-width:2rem;padding:.28rem .1rem;font-size:.78rem;font-weight:600;font-variant-numeric:tabular-nums;text-align:center;border:1px solid var(--line-2);border-radius:7px;background:var(--paper);color:var(--muted);cursor:pointer;transition:.12s}
+.seq-chip:hover{border-color:var(--danger,#c0392b);color:var(--ink)}
+.seq-chip.on{background:var(--danger,#c0392b);border-color:var(--danger,#c0392b);color:#fff}
+.seq-chip:focus-visible{outline:2px solid var(--danger,#c0392b);outline-offset:2px}
+.seq-toggle{display:inline-flex;align-items:center;gap:.55rem;padding:.5rem .7rem;border:1px solid var(--line);border-radius:10px;background:var(--paper);font-size:.82rem;color:var(--ink);text-align:left;cursor:pointer;line-height:1.35}
+.seq-toggle .seq-knob{flex:none;width:34px;height:20px;border-radius:999px;background:var(--line-2);position:relative;transition:.15s}
+.seq-toggle .seq-knob::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 2px rgba(0,0,0,.25);transition:.15s}
+.seq-toggle.on{border-color:var(--gold);background:var(--gold-soft)}
+.seq-toggle.on .seq-knob{background:var(--gold)}
+.seq-toggle.on .seq-knob::after{left:16px}
+.seq-toggle:focus-visible{outline:2px solid var(--gold);outline-offset:2px}
+.seq-insight{background:var(--gold-soft);border:1px solid var(--gold);border-radius:10px;padding:.6rem .85rem;font-size:.92rem;line-height:1.5;color:var(--ink);margin-bottom:.8rem}
+.seq-note{font-size:.76rem;color:var(--muted);margin:.4rem 0 0;line-height:1.45}
+.lbl-note{font-weight:400;color:var(--faint);font-size:.9em}
 .rep-opt{display:flex;align-items:flex-start;gap:.7rem;padding:.7rem .2rem;border-bottom:1px solid var(--line)}
 .rep-opt:last-child{border-bottom:none}
 .rep-opt input{width:auto;margin-top:.25rem}

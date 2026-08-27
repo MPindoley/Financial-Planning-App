@@ -3857,6 +3857,10 @@ function buildDecision() {
     <div style="height:1.1rem"></div>
     <div id="res-decision"></div>
     <div style="height:1.1rem"></div>
+    ${panel('Sequence-of-Returns Risk', `<p class="view-sub" style="margin-top:0;margin-bottom:.7rem">Two portfolios earning the <b>same average return</b> can end up worlds apart if a bad year lands at the wrong time — the danger is greatest just as withdrawals begin. Drop a down year anywhere on the timeline and show the client what the <b>order</b> of returns does.</p>
+      <div id="seq-controls">${seqControlsHTML()}</div>
+      <div id="res-seqrisk">${seqResultsHTML()}</div>`, { sub: 'When a loss lands', hideKey: 'dec-seq' })}
+    <div style="height:1.1rem"></div>
     <div class="advisor-only">${panel('Life Events', `<p class="view-sub" style="margin-top:0;margin-bottom:.6rem">Events are built into the plan and flow through every projection, chart, and the cash-flow timeline.</p>
       <div id="eventsList">${(STATE.events || []).map(eventRow).join('')}</div>${addBtns}`, { sub: 'Planned' })}</div>`;
 }
@@ -3913,6 +3917,115 @@ function ssOptimizerPanel() {
     `<p class="rp-disclaimer" style="margin-top:.4rem">Benefits estimated from the entered full-retirement-age (67) amount: roughly 70% at 62 and 124% at 70, grown by ${pct(STATE.assumptions.ssCola, 1)} COLA. Lifetime totals assume benefits through life expectancy; the optimal age depends on longevity, taxes, and spousal strategy — confirm with the client. The plan projection applies these same claiming-age factors.</p>`,
     { sub: 'Claiming strategy', hideKey: 'dec-ss' });
 }
+
+/* ------------------ Sequence-of-returns risk (Decision Center) ------------- */
+let SEQ = null;                                                        // ephemeral what-if, seeded from the plan
+function seqDefaults() {
+  const R = RESULTS, A = STATE.assumptions, c = STATE.household.client;
+  const retAge = Math.round(+c.retireAge || R.retAge || 65);
+  const life = Math.round(+c.lifeExpectancy || R.life || 92);
+  const raw = Math.max(5, Math.min(40, (life - retAge) || 30));
+  const years = [10, 15, 20, 25, 30, 35, 40].reduce((a, o) => Math.abs(o - raw) < Math.abs(a - raw) ? o : a, 25);   // snap to a dropdown option
+  const start = Math.max(0, Math.round((R.investable || 500000) / 1000) * 1000);
+  const wd = Math.max(0, Math.round(start * 0.04 / 1000) * 1000);      // 4% first-year draw, editable
+  return { _planId: currentPlanId, startAge: retAge, years, start, wd, avg: +A.postReturn || 5, infl: +A.inflation || 2.5, severity: -20, holdAvg: true, downYears: [1] };
+}
+function seqEnsure() {
+  if (!SEQ || SEQ._planId !== currentPlanId) SEQ = seqDefaults();
+  SEQ.downYears = (SEQ.downYears || []).filter(y => y >= 1 && y <= SEQ.years);
+  return SEQ;
+}
+function seqSim(s, downYears) {
+  const A = s.avg / 100, d = s.severity / 100, infl = s.infl / 100, N = s.years, down = new Set(downYears);
+  let other = A;                                                       // return in the non-down years
+  if (s.holdAvg && down.size < N) other = (N * A - down.size * d) / (N - down.size);   // solved so the arithmetic average stays A
+  const run = returns => {
+    let bal = s.start, depAge = null; const path = [{ x: s.startAge, y: bal }];
+    for (let i = 1; i <= N; i++) {
+      const w = s.wd * Math.pow(1 + infl, i - 1);                      // inflation-adjusted withdrawal, taken at the start of the year
+      bal = Math.max(0, (bal - w) * (1 + returns[i - 1]));
+      if (bal <= 0 && depAge == null) depAge = s.startAge + i;
+      path.push({ x: s.startAge + i, y: bal });
+    }
+    return { path, ending: bal, depAge, avg: returns.reduce((a, b) => a + b, 0) / N * 100 };
+  };
+  const baseR = [], scenR = [];
+  for (let i = 1; i <= N; i++) { baseR.push(A); scenR.push(down.has(i) ? d : (s.holdAvg ? other : A)); }
+  return { base: run(baseR), scen: run(scenR), other: other * 100 };
+}
+const seqAgeFmt = (v, endAge) => v >= endAge ? `${endAge}+` : `age ${Math.round(v)}`;
+function seqPlacement(s) {
+  const y = (s.downYears || []).slice().sort((a, b) => a - b);
+  if (!y.length) return 'no down year';
+  if (y.length === 1) return `a ${s.severity}% year in year ${y[0]}`;
+  if (y.length === 2) return `${s.severity}% years in years ${y[0]} & ${y[1]}`;
+  return `${s.severity}% years (${y.length} of them)`;
+}
+function seqControlsHTML() {
+  const s = seqEnsure();
+  const sevOpts = [[-10, '−10% · mild dip'], [-20, '−20% · bear market'], [-35, '−35% · severe (2008)'], [-50, '−50% · crash']];
+  const yearOpts = [10, 15, 20, 25, 30, 35, 40].map(v => `<option value="${v}" ${s.years === v ? 'selected' : ''}>${v} years</option>`).join('');
+  const chips = Array.from({ length: s.years }, (_, i) => i + 1).map(y =>
+    `<button class="seq-chip ${s.downYears.includes(y) ? 'on' : ''}" data-action="seq-year" data-y="${y}" title="Toggle a market drop in year ${y}">${y}</button>`).join('');
+  return `<div class="grid cols-4" style="margin-bottom:.5rem">
+      <div class="field"><label>Starting portfolio</label><div class="control has-prefix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-money data-seq="start" value="${moneyDisplay(s.start)}"></div></div>
+      <div class="field"><label>Annual withdrawal <span class="lbl-note">grows with inflation</span></label><div class="control has-prefix has-suffix"><span class="prefix">$</span><input type="text" inputmode="decimal" data-money data-seq="wd" value="${moneyDisplay(s.wd)}"><span class="suffix">/yr</span></div></div>
+      <div class="field"><label>Average return</label><div class="control has-suffix"><input type="number" step="0.1" data-seq="avg" value="${s.avg}"><span class="suffix">%</span></div></div>
+      <div class="field"><label>Years in retirement</label><select data-seq="years">${yearOpts}</select></div>
+    </div>
+    <div class="grid cols-2" style="margin-bottom:.6rem;align-items:end">
+      <div class="field"><label>How bad is the down year?</label><select data-seq="severity">${sevOpts.map(o => `<option value="${o[0]}" ${s.severity === o[0] ? 'selected' : ''}>${o[1]}</option>`).join('')}</select></div>
+      <button class="seq-toggle ${s.holdAvg ? 'on' : ''}" data-action="seq-holdavg" role="switch" aria-checked="${s.holdAvg}"><span class="seq-knob"></span><span>Keep the <b>average return identical</b> — offset the down year with slightly stronger years, isolating pure timing</span></button>
+    </div>
+    <div class="seq-picklab">Click the year(s) the market drops: <button class="btn ghost sm" data-action="seq-reset" style="margin-left:.4rem;padding:.1rem .5rem">↺ Reset to plan</button></div>
+    <div class="seq-chips" id="seq-chips">${chips}</div>`;
+}
+function seqResultsHTML() {
+  const s = seqEnsure();
+  if (!(s.start > 0)) return '<div class="empty">Enter a starting portfolio to model sequence risk.</div>';
+  const sim = seqSim(s, s.downYears), b = sim.base, c = sim.scen, endAge = s.startAge + s.years;
+  const diff = b.ending - c.ending;
+  const markers = (s.downYears || []).slice(0, 3).map(y => ({ x: s.startAge + y, label: '▼' }));
+  const chart = lineChart([
+    { name: 'Steady', color: 'var(--ink)', points: b.path },
+    { name: 'Shock', color: 'var(--danger, #c0392b)', dash: true, points: c.path }
+  ], { markers, xticks: Math.min(8, s.years) });
+  // headline insight
+  let insight;
+  if (!s.downYears.length) insight = 'Pick a year above to drop the market and watch what happens.';
+  else {
+    let clause = '';
+    if (c.depAge && !b.depAge) clause = ` and <b>drains the portfolio by ${seqAgeFmt(c.depAge, endAge)}</b> — money that otherwise lasted the full ${s.years} years`;
+    else if (c.depAge && b.depAge && c.depAge < b.depAge) clause = ` and empties it <b>${b.depAge - c.depAge} year${b.depAge - c.depAge === 1 ? '' : 's'} sooner</b>`;
+    else clause = ` — <b>${fmt$(Math.abs(diff))} ${diff >= 0 ? 'less' : 'more'}</b> at ${seqAgeFmt(endAge, endAge)}`;
+    insight = `${s.holdAvg ? 'Same <b>' + pct(s.avg, 1) + ' average return</b> either way' : 'Assuming ' + pct(s.avg, 1) + ' in every other year'} — but ${seqPlacement(s)}${clause}.`;
+  }
+  const otherNote = (s.holdAvg && s.downYears.length && s.downYears.length < s.years)
+    ? `<p class="seq-note">To hold the ${pct(s.avg, 1)} average, the other years earn <b>${pct(sim.other, 1)}</b> each. ${sim.other > 25 ? '⚠ That’s unrealistically high — try fewer or milder down years.' : ''}</p>` : '';
+  // timing table: the SAME single down year placed early / mid / late (average held constant)
+  let timing = '';
+  if (s.wd > 0 && s.years >= 4) {
+    const held = Object.assign({}, s, { holdAvg: true });
+    const spots = [{ y: 1, k: 'Early (year 1)' }, { y: Math.round(s.years / 2), k: `Midway (year ${Math.round(s.years / 2)})` }, { y: s.years, k: `Late (year ${s.years})` }];
+    const rows = spots.map(sp => { const r = seqSim(held, [sp.y]).scen; return `<tr><td style="text-align:left">${sp.k}</td><td class="amount">${fmt$(r.ending)}</td><td class="amount">${r.depAge ? seqAgeFmt(r.depAge, endAge) : `${endAge}+`}</td></tr>`; }).join('');
+    timing = `<div class="section-label">Same down year, same average — only the timing moves</div>
+      <table class="tbl"><thead><tr><th style="text-align:left">${s.severity}% year lands…</th><th>Ending at ${seqAgeFmt(endAge, endAge)}</th><th>Lasts to</th></tr></thead><tbody>${rows}</tbody></table>
+      <p class="seq-note">Identical average return in all three — an early loss hurts most because it comes out of the largest balance while withdrawals are still being taken.</p>`;
+  }
+  return `<div class="seq-insight">${insight}</div>
+    ${chart}
+    <div class="legend"><span><i class="dot" style="background:var(--ink)"></i>Steady ${pct(s.avg, 1)} every year</span><span><i class="dot" style="background:var(--danger,#c0392b)"></i>With the down year(s)</span>${markers.length ? '<span>▼ down year</span>' : ''}</div>
+    <table class="tbl" style="margin-top:1rem"><thead><tr><th style="text-align:left">Metric</th><th>Steady</th><th>With down year</th><th>Difference</th></tr></thead><tbody>
+      ${cmpRow('Average annual return', b.avg, c.avg, v => pct(v, 1))}
+      ${cmpRow('Ending balance at ' + seqAgeFmt(endAge, endAge), b.ending, c.ending, fmt$)}
+      ${(() => { const lb = b.depAge || endAge, lc = c.depAge || endAge, gap = Math.round(lb - lc);
+        return `<tr><td style="text-align:left">Portfolio lasts to</td><td class="amount">${seqAgeFmt(lb, endAge)}</td><td class="amount">${seqAgeFmt(lc, endAge)}</td><td class="delta ${gap > 0 ? 'down' : ''}">${gap > 0 ? '▼ ' + gap + ' yr' + (gap === 1 ? '' : 's') + ' sooner' : '—'}</td></tr>`; })()}
+    </tbody></table>${otherNote}${timing}
+    <p class="rp-disclaimer" style="margin-top:.5rem">A teaching illustration, not a projection: withdrawals are taken at the start of each year and grown with inflation; every non-down year earns the same return. Real markets move every year — this isolates the effect of <b>when</b> a loss lands.</p>`;
+}
+function renderSeqControls() { const el = $('#seq-controls'); if (el) el.innerHTML = seqControlsHTML(); }
+function renderSeqResults() { const el = $('#res-seqrisk'); if (el) el.innerHTML = seqResultsHTML(); }
+function renderSeqRisk() { renderSeqControls(); renderSeqResults(); }
 
 /* ----------------------------- COPLANNER ---------------------------------- */
 function renderCoplanner() {
@@ -4903,6 +5016,9 @@ function handleAction(action, el) {
     }
     case 'open-report': openReport(); break;
     case 'reset-scenario': SCENARIO = { retireDelta: 0, savingsMult: 1, returnDelta: 0, spendDelta: 0, ssDelta: 0, insuranceMult: 1, ltcCoverage: 0 }; built.decision = false; showView('decision'); break;
+    case 'seq-year': { const y = +el.dataset.y, s = seqEnsure(), i = s.downYears.indexOf(y); if (i >= 0) s.downYears.splice(i, 1); else s.downYears.push(y); renderSeqRisk(); break; }
+    case 'seq-holdavg': { const s = seqEnsure(); s.holdAvg = !s.holdAvg; renderSeqRisk(); break; }
+    case 'seq-reset': SEQ = seqDefaults(); renderSeqRisk(); break;
     case 'hidesec': STATE.presentation.hidden[el.dataset.key] = el.checked; scheduleSave(); recompute(); break;
     case 'save-baseline': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); recompute(); toast('Baseline saved — make a change to see the impact'); break; }
     case 'build-plan': { const snap = JSON.parse(JSON.stringify(STATE)); delete snap.baseline; STATE.baseline = snap; scheduleSave(); showView('dashboard'); toast('Plan built — here’s the dashboard'); break; }
@@ -4989,6 +5105,12 @@ function onInput(e) {
   if (t.matches('[data-surv]')) {
     const k = t.getAttribute('data-surv'); SURVIVOR[k] = k === 'who' ? t.value : (+t.value || 0);
     liveDecision(); return;
+  }
+  if (t.matches('[data-seq]')) {
+    const k = t.getAttribute('data-seq'), s = seqEnsure();
+    s[k] = t.type === 'checkbox' ? t.checked : (t.hasAttribute('data-money') ? parseMoney(t.value) : (parseFloat(t.value) || 0));
+    if (k === 'years') { s.years = Math.max(2, Math.min(40, Math.round(s.years) || 30)); s.downYears = s.downYears.filter(y => y <= s.years); if (!s.downYears.length) s.downYears = [1]; renderSeqControls(); }
+    renderSeqResults(); return;
   }
   if (t.matches('[data-dashwin-from]') || t.matches('[data-dashwin-years]')) {
     const R = RESULTS;
